@@ -1,0 +1,13 @@
+﻿# 构建产物
+build/
+.gradle/
+dist/
+*.apk
+*.aab
+local.properties
+*.iml
+.idea/
+# 密钥(绝不入库)
+*.jks
+*.keystore
+keystore.properties

@@ -1,0 +1,162 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- 上课提醒(P4) -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!--
+      精确闹钟。API 31+ 需要其中之一:
+        SCHEDULE_EXACT_ALARM  用户可在设置里撤销
+        USE_EXACT_ALARM       自动授予,但 Play 政策只允许闹钟/日历类用途
+      这里两个都声明;运行时用 canScheduleExactAlarms() 判断,拿不到就退化为不精确闹钟。
+    -->
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
+
+    <!-- 选课监听(P7):轮次之间要活过后台限制,所以用前台服务 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+
+    <!--
+      上课悬浮窗:要用户到系统设置里手动授「显示在其他应用上层」。
+      声明了才谈得上授权 —— 注意 appops set 对这个权限也要求先声明。
+    -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <!-- 悬浮窗服务用 specialUse(API 34+ 要求声明类型 + 子类型说明) -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+
+    <application
+        android:name=".XqApp"
+        android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.Xiqueer">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:theme="@style/Theme.Xiqueer"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- 上课闹钟 -->
+        <receiver
+            android:name=".notify.ClassAlarmReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.xiqueer.android.action.CLASS_REMINDER" />
+            </intent-filter>
+        </receiver>
+
+        <!-- 每日摘要闹钟(不依赖作息表,未配置时唯一的推送) -->
+        <receiver
+            android:name=".notify.DigestAlarmReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.xiqueer.android.action.DAILY_DIGEST" />
+            </intent-filter>
+        </receiver>
+
+        <!--
+          「正在上课」悬浮窗。只在课中运行,下课由闹钟停掉。
+          用 specialUse:它既不是数据同步也不是媒体播放,就是一个状态浮层;
+          API 34+ 要求这种"不属于任何既有类别"的前台服务显式说明用途。
+        -->
+        <service
+            android:name=".ui.overlay.ClassOverlayService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="上课期间在其他应用上层显示当前课程与下课倒计时" />
+        </service>
+
+        <!--
+          「正在上课」的锁屏/状态栏常驻通知:上课时刻发、下课时刻撤。
+          刻意**不用前台服务** —— 倒计时交给系统 chronometer,这里只响两次闹钟。
+        -->
+        <receiver
+            android:name=".notify.OngoingClassReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.xiqueer.android.action.CLASS_ONGOING" />
+            </intent-filter>
+        </receiver>
+
+        <!-- 开机 / 时区 / 时间变更后重排闹钟(系统会清掉已排的闹钟) -->
+        <receiver
+            android:name=".notify.RescheduleReceiver"
+            android:enabled="true"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.TIME_SET" />
+                <action android:name="android.intent.action.TIMEZONE_CHANGED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
+
+        <!-- 选课监听前台服务(防封参数见 WatchConfig) -->
+        <service
+            android:name=".watch.SelectionWatchService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
+        <!--
+          课表导出:把 cache/export 下的文件通过系统分享面板交出去。
+          用 FileProvider 而不是写公共目录,是为了**一个存储权限都不要**。
+        -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
+        <!--
+          P3a:把 WorkManager 的自动初始化从启动路径上摘掉。
+
+          默认情况下 startup-runtime 的 InitializationProvider 会在进程创建时同步执行
+          WorkManagerInitializer,而它要打开 Room 的 WorkDatabase(SQLite)—— 这是启动路径上
+          最贵的一步,而且我们**当前这一刻并不需要** WorkManager(周期任务晚几毫秒排完全没影响)。
+
+          删掉之后改由 XqApp 实现 Configuration.Provider 做按需初始化:
+          真正的第一次 `getInstance()` 发生在后台线程的 DailyRefreshWorker.enqueue 里。
+        -->
+        <provider
+            android:name="androidx.startup.InitializationProvider"
+            android:authorities="${applicationId}.androidx-startup"
+            android:exported="false"
+            tools:node="merge">
+            <meta-data
+                android:name="androidx.work.WorkManagerInitializer"
+                android:value="androidx.startup"
+                tools:node="remove" />
+        </provider>
+
+        <!--
+          仅 debug:exported 以便 adb 触发,验证提醒链路。
+          onReceive 里第一行就是 if (!BuildConfig.DEBUG) return —— release 构建不留后门。
+        -->
+        <receiver
+            android:name=".notify.DebugReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.xiqueer.android.debug.TEST_REMINDER" />
+                <action android:name="com.xiqueer.android.debug.TEST_DIGEST" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>

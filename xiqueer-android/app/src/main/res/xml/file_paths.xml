@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  FileProvider 暴露哪些目录。
+
+  只暴露 cache/export 一个子目录 —— FileProvider 的路径白名单越小越安全:
+  就算哪天拼接逻辑出问题,也穿越不到别的目录。
+-->
+<paths>
+    <cache-path name="exports" path="export/" />
+</paths>

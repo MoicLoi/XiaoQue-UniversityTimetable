@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!--
+      仅 debug:把网络安全配置指向"只放行本地联调地址"的那份。
+      release 不含这个文件,因此 release 依旧禁止明文流量。
+    -->
+    <application android:networkSecurityConfig="@xml/network_security_config" />
+
+</manifest>

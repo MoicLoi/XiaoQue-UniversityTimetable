@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!--
+      仅 benchmark 变体:`profileable` 让 Macrobenchmark 与 Baseline Profile 生成器
+      能对**非 debuggable** 的包做采样。
+
+      为什么不给 debug 包用:debug 是 debuggable,采样结果会被调试开销污染;
+      为什么不给 release 用:profileable 会削弱生产包的可分析性,不该带进发布件。
+
+      `networkSecurityConfig` 同理是 benchmark 专有:放行明文只为了能连宿主机上的
+      假 LLM 服务,好把 AI 那条链(工具执行 / 写操作确认门)在**压缩包里**也跑一遍。
+      这是与 release 的唯一差异,release 不含此项。
+    -->
+    <application android:networkSecurityConfig="@xml/network_security_config">
+        <profileable
+            android:shell="true"
+            tools:targetApi="29" />
+    </application>
+
+</manifest>

@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  自适应图标(API 26+)。
+
+  前景用的 `ic_launcher_foreground.png` 已经是**白底 + logo**,铺满整个 108dp 画布,
+  而 logo 只占画布 60% —— 落在系统 66% 安全区内,所以无论启动器用圆形、方形
+  还是水滴形遮罩,logo 都不会被切掉。
+
+  刻意让前景不透明(而不是"透明前景 + 纯色背景"):源图本身就是白底设计,
+  分成两层反而要抠图,而抠图边缘的光晕我无法用眼睛确认。
+  代价是自适应图标的"背景可换色"这个能力用不上 —— 对这个图标没有损失。
+-->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@color/ic_launcher_background" />
+    <foreground android:drawable="@mipmap/ic_launcher_foreground" />
+</adaptive-icon>

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!--
+      self-instrumenting 的 test 模块:它既是测试代码也是被测包的驱动,
+      所以这里保留 instrumentation 声明,但不带 targetPackage
+      (由 Macrobenchmark 自己在运行时指定要启动哪个包)。
+    -->
+    <application android:label="Xq Macrobenchmark" />
+
+</manifest>

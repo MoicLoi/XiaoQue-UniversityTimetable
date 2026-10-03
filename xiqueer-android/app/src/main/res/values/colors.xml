@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      图标底色。源图 `icon.png` 是**白底 + 居中蓝色 logo**,所以底色取白 ——
+      这是对原设计最忠实的还原,不做抠图(抠白底会在边缘留下光晕,
+      而我没有办法用眼睛确认结果,宁可不做)。
+    -->
+    <color name="ic_launcher_background">#FFFFFFFF</color>
+</resources>

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 纯 Compose,用平台主题避免引入 appcompat -->
+    <style name="Theme.Xiqueer" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">#FF10131A</item>
+        <item name="android:navigationBarColor">#FF10131A</item>
+        <item name="android:statusBarColor">#FF10131A</item>
+    </style>
+</resources>
