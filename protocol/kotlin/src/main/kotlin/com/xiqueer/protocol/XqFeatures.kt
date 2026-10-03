@@ -46,7 +46,7 @@ data class GradeRow(
 )
 
 /**
- * 领域封装 —— 与 `protocol/js/features.js` 对齐。
+ * 领域封装 —— 与 同一协议的 JS 参考实现 对齐。
  * 只做纯解析/组装,网络全走 [XqClient](联网方法均为 `suspend`)。
  */
 object XqFeatures {
@@ -220,7 +220,7 @@ object XqFeatures {
      * 每条字段:`xxdm` / `xxmc` / `pinyin` / `gkksh` / `mode` / `rzfs` / `serviceUrl`。
      */
     suspend fun schools(client: XqClient): List<Map<String, Any?>> {
-        val r = client.callAnon(mapOf("action" to "getAgent", "appver" to "2.6.451"))
+        val r = client.callAnon(mapOf("action" to "getAgent", "appver" to XqRsa.APPVER))
         val raw = r["raw"] as? String ?: return emptyList()
         return runCatching { XqJson.parseArray(raw).objects() }.getOrDefault(emptyList())
     }

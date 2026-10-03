@@ -1,6 +1,6 @@
 package com.xiqueer.protocol
 
-/** 登录结果。`flag` 的语义见 `protocol/SPEC.md` §8。 */
+/** 登录结果。`flag` 的语义见 协议规格 §8。 */
 data class XqLoginResult(
     val ok: Boolean,
     val flag: String?,
@@ -22,7 +22,7 @@ data class XqLoginResult(
 }
 
 /**
- * 喜鹊儿协议客户端。对应 `protocol/SPEC.md` 与 `protocol/js/client.js`。
+ * 喜鹊儿协议客户端。对应 协议规格 与 同一协议的 JS 参考实现。
  *
  * ```kotlin
  * val client = XqClient(transport = okHttpTransport())

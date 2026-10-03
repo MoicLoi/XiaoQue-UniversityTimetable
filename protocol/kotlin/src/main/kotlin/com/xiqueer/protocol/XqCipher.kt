@@ -6,10 +6,10 @@ import java.util.Base64
 /**
  * 喜鹊儿协议 —— 密码原语。
  *
- * 对应 `protocol/SPEC.md` §2(`param` / `ba.b.k`)、§2 逆运算(`ba.b.j`)、
+ * 对应 协议规格 §2(`param` / `ba.b.k`)、§2 逆运算(`ba.b.j`)、
  * §3(`param2`)、§5.3(`urlEscape`)。
  *
- * 正确性由 `protocol/vectors/vectors.json` 保证,不要凭直觉改这里的边界处理。
+ * 正确性由同一套一致性测试向量保证,不要凭直觉改这里的边界处理。
  */
 object XqCipher {
 

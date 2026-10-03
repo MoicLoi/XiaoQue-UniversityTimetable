@@ -13,7 +13,7 @@ package com.xiqueer.protocol
  *
  * 成功的响应体里**不带** `errcode` —— 这条结论有两处依据:
  * `parseTimetable` 长期在线上跑的行为(它原本就"只要有 errcode 就抛"),
- * 以及 `protocol/SPEC.md` §5.3 记录的取值表:
+ * 以及 协议规格 §5.3 记录的取值表:
  * `-1` 未登录/权限不足、`-2` 非法调用/请升级、`-5` action 不存在 —— **全是失败**。
  *
  * ⚠️ **为什么必须放在入口处**:原来只有 `parseTimetable` 一个接口查了 `errcode`,

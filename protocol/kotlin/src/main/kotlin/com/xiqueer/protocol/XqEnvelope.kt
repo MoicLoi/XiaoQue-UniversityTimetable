@@ -31,7 +31,7 @@ data class EnvelopeOptions(
 
 /**
  * 喜鹊儿协议 —— 封套组装与响应解码。
- * 对应 `protocol/SPEC.md` §1(九字段)、§5(明文)、§6(响应)、§7(登录)。
+ * 对应 协议规格 §1(九字段)、§5(明文)、§6(响应)、§7(登录)。
  */
 object XqEnvelope {
 
@@ -130,6 +130,7 @@ object XqEnvelope {
         "os" to "android",
         "xtbb" to osVersion,
         "loginmode" to "0",
-        "appver" to "2.6.451",
+        // ⚠️ 版本闸门在这里,不是在 appinfo 上 —— 见 XqRsa.APPVER 的注释。
+        "appver" to XqRsa.APPVER,
     )
 }

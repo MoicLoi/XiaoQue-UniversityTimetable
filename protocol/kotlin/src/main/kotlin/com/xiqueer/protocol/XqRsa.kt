@@ -10,7 +10,7 @@ import java.util.Random
 import javax.crypto.Cipher
 
 /**
- * 喜鹊儿协议 —— RSA 层。对应 `protocol/SPEC.md` §4。
+ * 喜鹊儿协议 —— RSA 层。对应 协议规格 §4。
  *
  * App 用一对 1024-bit RSA 密钥给每个请求签名,密钥以混淆字符串内嵌:
  * 两个来自 `libnative-lib.so` 的 native 常量 + 四个 DEX 常量,拼起来过一遍
@@ -26,7 +26,30 @@ import javax.crypto.Cipher
 object XqRsa {
 
     const val DMKEY = "PUT-YOUR-DMKEY-HERE"
-    const val APPINFO = "android2.6.451"
+
+    /**
+     * 客户端版本号 —— **这是登录的版本闸门**。
+     *
+     * 服务端在 `getLoginInfoNew` 上比对明文字段 `appver`,低于 `2.6.452` 一律回
+     * `flag:"-99"` + 兜底文案「有新版本啦…必须更新后才能登录」。实测(`2026-10`)
+     * `2.6.451`/`2.6.45`/`1.0.0` 被拒,`2.6.452` 及以上(含 `2.6.4550`、`3.0.0`)通过
+     * —— 所以是**数值比较 `appver >= 2.6.452`**,不是等值匹配。
+     *
+     * ⚠️ **改版本号时必须同时改 [APPVER] 和 [APPINFO]。** 两者不同源、也不在同一个地方:
+     * [APPINFO] 是**请求体**里的第九个字段(信封层),`appver` 是**业务明文**里的字段。
+     * 只改其中一个,表现就是"明明升级了版本号还是登不上"。
+     *
+     * 另外注意一个**反直觉点**:服务端对签名字段(`encrptSecretKey` / `xqerSign`)
+     * **只检查存在性、不校验内容** —— 换成任意非空垃圾字符串都能通过,只有**删掉**才报
+     * `errcode:-2`。但这**不代表**本文件里的 `PUT-YOUR-*` 占位符可以直接用:
+     * 请求里的这两个字段是本地用 [publicKey] / [privateKey] 算出来的,而占位符解不出合法 DER
+     * (实测 `unparam1` 虽然不抛异常,但只得到 6 字节、首字节 `0x22`,而 DER SEQUENCE 应为 `0x30`),
+     * 所以那两个惰性属性会构造失败,请求根本发不出去。
+     * 也就是说:**要能发出请求,这些常量必须解得出合法的 RSA DER**;
+     * 而**要能读懂响应**,还必须自己准备真实的 [RESP_KEY] / [RESP_IV](响应是 AES 密文)。
+     */
+    const val APPVER = "2.6.455"
+    const val APPINFO = "android2.6.455"
     const val SERVICE_URL = "https://api.xiqueer.com/manager/"
 
     /** 响应解密用的固定 AES-128-CBC 密钥/IV(`t9.ba.a` AESAPPUtil)。 */

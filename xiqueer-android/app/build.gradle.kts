@@ -42,10 +42,18 @@ android {
         minSdk = 26
         targetSdk = 37
         // 包名与版本号换成了正式线:**这是一个全新的 App**,
-        // 与旧的 me.molaic.betterxqr 数据不互通、可以并存安装。
+        // 与旧的 me.moiclathy.dism 数据不互通、可以并存安装。
         // 所以 versionCode 从 1 重新起算 —— 它只在这个包名内比较。
-        versionCode = 1
-        versionName = "mlOfficial-V1.0.0"
+        //
+        // versionCode 1 / 2 是**开发期内部测试包,从未对外发布**;V1.0.2 是首次公开发布。
+        // 编号跳过的原因:内部包 V1.0.1 有一个登录缺陷 —— 登录的版本闸门是
+        // **业务明文里的 `appver`**,而不是请求信封里的 `appinfo`,只改后者完全无效(实测)。
+        // 成因与阈值见 XqRsa.APPVER 的注释。
+        //
+        // ⚠️ 从源码自建时,如果要覆盖安装已发布的包,**版本号必须 >= 它**,
+        // 否则 Android 会以 INSTALL_FAILED_VERSION_DOWNGRADE 拒绝。
+        versionCode = 3
+        versionName = "mlOfficial-V1.0.2"
     }
 
     signingConfigs {

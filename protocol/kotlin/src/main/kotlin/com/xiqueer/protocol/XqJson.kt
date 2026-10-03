@@ -6,8 +6,7 @@ package com.xiqueer.protocol
  * 只需覆盖喜鹊儿接口响应的形态;输出类型:
  * `Map<String, Any?>` / `List<Any?>` / `String` / `Long` / `Double` / `Boolean` / `null`。
  *
- * 不是通用实现(不支持注释、不保留数字精度语义),但对本协议足够,
- * 且被 `XqJsonTest` 用真实的 `vectors.json` 覆盖。
+ * 不是通用实现(不支持注释、不保留数字精度语义),但对本协议足够。
  */
 object XqJson {
 
