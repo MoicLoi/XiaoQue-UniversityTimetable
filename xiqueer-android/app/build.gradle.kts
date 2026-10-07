@@ -50,10 +50,14 @@ android {
         // **业务明文里的 `appver`**,而不是请求信封里的 `appinfo`,只改后者完全无效(实测)。
         // 成因与阈值见 XqRsa.APPVER 的注释。
         //
+        // V1.0.3 —— 新增两个**本地覆盖层**功能:课节覆写(改某一节的教室/节次)与
+        // 晚自习(自定义时段,进网格 + 日程 + 提醒)。四种导出(ics/xlsx/csv/png)全部覆盖。
+        // 覆盖层与底表严格分开写:刷新冲不掉,也不会污染服务器数据。
+        //
         // ⚠️ 从源码自建时,如果要覆盖安装已发布的包,**版本号必须 >= 它**,
         // 否则 Android 会以 INSTALL_FAILED_VERSION_DOWNGRADE 拒绝。
-        versionCode = 3
-        versionName = "mlOfficial-V1.0.2"
+        versionCode = 4
+        versionName = "mlOfficial-V1.0.3"
     }
 
     signingConfigs {

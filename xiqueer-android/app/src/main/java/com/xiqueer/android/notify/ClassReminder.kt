@@ -1,5 +1,6 @@
 package com.xiqueer.android.notify
 
+import com.xiqueer.android.data.CourseKey
 import com.xiqueer.android.data.PeriodTimes
 import com.xiqueer.protocol.Course
 import com.xiqueer.protocol.Timetable
@@ -32,11 +33,33 @@ data class ClassOccurrence(
     val classEndMillis: Long?,
     /** 闹钟应响的时刻;未配置作息时为 null。 */
     val fireAtMillis: Long?,
+    /**
+     * **底表身份**(`name|periods|room|teacher`,由 [CourseKey.of] 算)。
+     *
+     * 课节覆写靠它把"这一节"认回来 —— 用覆写后的值去认会认不出自己,
+     * 因为覆写改的正是 `periods` / `room` 这两项。
+     */
+    val courseKey: String = "",
+    /**
+     * 非 null = 这**不是**服务端课表里的第 N 节,而是一个自定义时段(晚自习)。
+     * 有值时界面不显示"第 N 节",改显示它本身;网格里它占的行也由外部指定。
+     */
+    val customLabel: String? = null,
 ) {
+    /** 是不是自定义时段(晚自习),而不是服务端的第 N 节。 */
+    val isCustom: Boolean get() = !customLabel.isNullOrBlank()
+
     /** 通知/列表里的一行:`第 1-2 节 · 08:00 · 厚德楼-H502` */
     fun scheduleLine(): String = buildString {
-        append("第 $periodStart-$periodEnd 节")
-        if (startLabel != null) append(" · ").append(startLabel)
+        if (isCustom) {
+            append(customLabel)
+        } else {
+            append("第 $periodStart-$periodEnd 节")
+        }
+        if (startLabel != null) {
+            append(" · ").append(startLabel)
+            if (endLabel != null) append("-").append(endLabel)
+        }
         val where = listOf(room, teacher).filter { it.isNotBlank() }.joinToString(" · ")
         if (where.isNotBlank()) append(" · ").append(where)
     }
@@ -237,6 +260,51 @@ object ClassReminder {
             classStartMillis = startMillis,
             classEndMillis = endMillis,
             fireAtMillis = startMillis?.minus(leadMs),
+            // 身份用**底表**的值算 —— 覆写改的正是 periods / room,不能用覆写后的
+            courseKey = CourseKey.of(c),
+        )
+    }
+
+    /**
+     * `date` 那天的 `HH:mm` 对应的绝对毫秒;给不出时间或解析失败返回 null。
+     *
+     * 自定义时段(晚自习)与 [retimePeriods] 都用它 —— 时间字符串只有这一处变成毫秒。
+     */
+    fun millisAt(date: LocalDate, clock: String?, zone: ZoneId = ZoneId.systemDefault()): Long? {
+        if (clock.isNullOrBlank()) return null
+        return runCatching {
+            LocalDateTime.of(date, LocalTime.parse(clock)).atZone(zone).toInstant().toEpochMilli()
+        }.getOrNull()
+    }
+
+    /**
+     * 换节次 —— 课节覆写把课从 `5-6` 挪到 `3-4` 时用它。
+     *
+     * **节次、时间标签、绝对时刻必须一起改**:只改 `periodStart/End` 而留着旧的
+     * `startLabel` / `classStartMillis`,就会出现"格子挪到第 3 节了,但提醒还按第 5 节响"。
+     * 这与 [retime] 是同一类坑,所以换算同样只放在这一处,别在外面手工拼。
+     *
+     * 未配置作息([times] 为空或不 `configured`)时标签为 null、时刻为 null ——
+     * 不编造时间。
+     */
+    fun retimePeriods(
+        o: ClassOccurrence,
+        periodStart: Int,
+        periodEnd: Int,
+        times: PeriodTimes?,
+        zone: ZoneId = ZoneId.systemDefault(),
+    ): ClassOccurrence {
+        val startLabel = times?.startOf(periodStart)
+        val endLabel = times?.endOf(periodEnd)
+        return o.copy(
+            periodStart = periodStart,
+            periodEnd = periodEnd,
+            startLabel = startLabel,
+            endLabel = endLabel,
+            classStartMillis = millisAt(o.date, startLabel, zone),
+            classEndMillis = millisAt(o.date, endLabel, zone),
+            // 触发时刻按新节次重算,不能留旧的
+            fireAtMillis = null,
         )
     }
 }

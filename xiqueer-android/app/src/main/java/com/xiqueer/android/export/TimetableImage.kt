@@ -6,8 +6,8 @@ import android.graphics.Paint
 import android.graphics.RectF
 import android.graphics.Typeface
 import com.xiqueer.android.CourseColors
+import com.xiqueer.android.data.Overlays
 import com.xiqueer.android.data.PeriodTimes
-import com.xiqueer.android.data.Shift
 import com.xiqueer.android.notify.ClassReminder
 import com.xiqueer.android.notify.ScheduleOverrides
 import com.xiqueer.protocol.Timetable
@@ -55,16 +55,18 @@ object TimetableImage {
     private const val GRAY = 0xFF6B7280.toInt()
     private const val TODAY_BG = 0x146FA8FF
 
-    fun png(t: Timetable, times: PeriodTimes, shifts: List<Shift>): ByteArray {
-        val maxPeriod = maxOf(1, t.maxPeriod).coerceAtMost(14)
+    fun png(t: Timetable, times: PeriodTimes, overlays: Overlays): ByteArray {
+        // 行数 = 服务端节次 + 晚自习等自定义时段。上限只用来防服务端给出荒唐的节次数,
+        // 不能小到把用户自己加的时段裁掉 —— 那会表现为"导出的图上晚自习凭空消失"。
+        val rows = ScheduleOverrides.gridRows(t, overlays).coerceAtMost(18)
         val w = (PAD * 2 + GUTTER + CELL_W * 7).toInt()
-        val h = (PAD * 2 + TITLE_H + HEADER_H + CELL_H * maxPeriod + FOOTER_H).toInt()
+        val h = (PAD * 2 + TITLE_H + HEADER_H + CELL_H * rows + FOOTER_H).toInt()
 
         val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         val c = Canvas(bmp)
         c.drawColor(BG)
 
-        val week = ScheduleOverrides.week(t, times, shifts)
+        val week = ScheduleOverrides.week(t, times, overlays)
         val monday = ClassReminder.weekMonday(t)
         val gridTop = PAD + TITLE_H + HEADER_H
 
@@ -80,12 +82,12 @@ object TimetableImage {
                 paint(0xFF000000.toInt()).let { p ->
                     p.color = TODAY_BG
                     p.style = Paint.Style.FILL
-                    c.drawRect(x0, gridTop, x0 + CELL_W, gridTop + CELL_H * maxPeriod, p)
+                    c.drawRect(x0, gridTop, x0 + CELL_W, gridTop + CELL_H * rows, p)
                 }
             }
             // 行分隔线
             val line = strokePaint(LINE, 1f)
-            for (p in 0..maxPeriod) {
+            for (p in 0..rows) {
                 val y = gridTop + CELL_H * p
                 c.drawLine(x0, y, x0 + CELL_W, y, line)
             }
@@ -94,11 +96,11 @@ object TimetableImage {
         val vline = strokePaint(LINE, 1f)
         for (day in 0..7) {
             val x = PAD + GUTTER + CELL_W * day
-            c.drawLine(x, gridTop, x, gridTop + CELL_H * maxPeriod, vline)
+            c.drawLine(x, gridTop, x, gridTop + CELL_H * rows, vline)
         }
 
-        drawGutter(c, t, times, maxPeriod, gridTop)
-        for (day in 0..6) drawColumn(c, week.getOrElse(day) { emptyList() }, day, maxPeriod, gridTop)
+        drawGutter(c, t, times, overlays, rows, gridTop)
+        for (day in 0..6) drawColumn(c, week.getOrElse(day) { emptyList() }, day, rows, gridTop)
         drawFooter(c, t, h)
 
         val out = ByteArrayOutputStream()
@@ -148,18 +150,28 @@ object TimetableImage {
         c: Canvas,
         t: Timetable,
         times: PeriodTimes,
-        maxPeriod: Int,
+        overlays: Overlays,
+        rows: Int,
         gridTop: Float,
     ) {
         val num = textPaint(TEXT_MID, 26f)
         val time = textPaint(TEXT_LO, 18f)
-        for (p in 1..maxPeriod) {
+        val serverPeriods = maxOf(1, t.maxPeriod)
+        for (p in 1..rows) {
             val cy = gridTop + CELL_H * (p - 1)
-            val label = "$p"
-            c.drawText(label, PAD + 20f, cy + 46f, num)
-            // 没填作息就不画时间 —— 绝不用猜的时间填空
-            times.startOf(p)?.let { s ->
-                c.drawText(s, PAD + 58f, cy + 46f, time)
+            if (p <= serverPeriods) {
+                val label = "$p"
+                c.drawText(label, PAD + 20f, cy + 46f, num)
+                // 没填作息就不画时间 —— 绝不用猜的时间填空
+                times.startOf(p)?.let { s ->
+                    c.drawText(s, PAD + 58f, cy + 46f, time)
+                }
+            } else {
+                // 自定义时段(晚自习):没有节次号,画它的名字与开始时间
+                val slot = overlays.selfStudies.getOrNull(p - serverPeriods - 1) ?: continue
+                val label = slot.label.take(2)
+                c.drawText(label, PAD + 12f, cy + 46f, num)
+                c.drawText(slot.start, PAD + 58f, cy + 46f, time)
             }
         }
     }
@@ -168,13 +180,13 @@ object TimetableImage {
         c: Canvas,
         col: List<com.xiqueer.android.notify.EffectiveCourse>,
         day: Int,
-        maxPeriod: Int,
+        rows: Int,
         gridTop: Float,
     ) {
         // 与网格页同一套:按节次分泳道,目标日本来就有课时并排两列
         val items = col.mapNotNull { e ->
             val o = e.occurrence
-            if (o.periodStart !in 1..maxPeriod) null
+            if (o.periodStart !in 1..rows) null
             else Item(o.courseName, o.periodStart, o.periodEnd, o.room, e.movedTo, e.movedFrom)
         }.sortedWith(compareBy({ it.start }, { -it.end }))
 

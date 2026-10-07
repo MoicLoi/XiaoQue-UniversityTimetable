@@ -26,6 +26,16 @@ class ToolRegistry(
     private val watch: WatchSettingsStore,
     private val shifts: com.xiqueer.android.data.ShiftStore,
     /**
+     * 当前覆盖层的读取入口(调休 + 课节覆写 + 晚自习)。
+     *
+     * 由持有 Context 的一方提供 —— 工具层刻意不持 Context。
+     *
+     * ⚠️ 读课表的工具**必须**走它:直接调 `ClassReminder.forDate` 拿到的是
+     * **底表**,AI 会说出与实际不符的答案(课挪走了它还说在原日子、
+     * 改了教室它还说老教室、晚自习它根本不知道)。
+     */
+    private val overlays: () -> com.xiqueer.android.data.Overlays = { com.xiqueer.android.data.Overlays.Empty },
+    /**
      * 监听开关落到"真的起停前台服务"的钩子。
      * 工具层刻意不持 Context —— 只改配置,副作用交给持有 Context 的一方。
      */
@@ -181,8 +191,12 @@ class ToolRegistry(
         "get_today_courses" -> {
             val t = repo.currentCachedTimetable()
                 ?: return "还没有课表缓存,请先在课表页刷新一次。"
-            // 作息表已配置就带上开始时间;没配就只有节次,不猜
-            val list = ClassReminder.forDate(t, LocalDate.now(), periods.load())
+            // 作息表已配置就带上开始时间;没配就只有节次,不猜。
+            // 走覆盖层:AI 说的必须和界面显示的是同一份(调休、改过的教室、晚自习都算)。
+            val list = com.xiqueer.android.notify.ScheduleOverrides
+                .forDate(t, periods.load(), overlays(), LocalDate.now())
+                .filter { !it.isMovedOut }
+                .map { it.occurrence }
             if (list.isEmpty()) "今天没有课。"
             else "今天 ${list.size} 节课:\n" + list.joinToString("\n") { "· " + it.scheduleLine() }
         }
@@ -192,13 +206,21 @@ class ToolRegistry(
                 ?: return "还没有课表缓存,请先在课表页刷新一次。"
             val monday = ClassReminder.weekMonday(t)
             val times = periods.load()
+            val ov = overlays()
             buildString {
                 append("第 ${t.currentWeek}/${t.maxWeek} 周")
                 if (monday != null) append("(${monday} 起)")
                 append(",每天最多 ${t.maxPeriod} 节\n")
                 for (d in 0..6) {
                     val date = monday?.plusDays(d.toLong())
-                    val rows = if (date != null) ClassReminder.forDate(t, date, times) else emptyList()
+                    val rows = if (date != null) {
+                        com.xiqueer.android.notify.ScheduleOverrides
+                            .forDate(t, times, ov, date)
+                            .filter { !it.isMovedOut }
+                            .map { it.occurrence }
+                    } else {
+                        emptyList()
+                    }
                     if (rows.isEmpty()) continue
                     for (o in rows) append("· ${XqFeatures.weekdayName(d)} ${o.scheduleLine()}\n")
                 }

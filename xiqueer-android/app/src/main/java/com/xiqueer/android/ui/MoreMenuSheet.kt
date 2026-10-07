@@ -32,8 +32,11 @@ fun BoxScope.MoreMenuSheet(
     versionLabel: String,
     noticeCount: Int,
     shiftCount: Int,
+    /** 已配置的自定义时段(晚自习)条数,0 = 未开启。 */
+    selfStudyCount: Int = 0,
     onNotices: () -> Unit,
     onShifts: () -> Unit,
+    onSelfStudy: () -> Unit = {},
     onDismiss: () -> Unit,
 ) {
     GlassSheet(visible = visible, onDismiss = onDismiss) {
@@ -50,6 +53,12 @@ fun BoxScope.MoreMenuSheet(
             title = "调休 / 换课",
             desc = if (shiftCount > 0) "已记录 $shiftCount 条" else "把某天的课挪到另一天(也可直接跟助手说)",
             onClick = onShifts,
+        )
+        Spacer(Modifier.height(8.dp))
+        MenuRow(
+            title = "晚自习",
+            desc = if (selfStudyCount > 0) "已开启 $selfStudyCount 条自定义时段" else "在时间轴上加一节自定义时段(会进日程与提醒)",
+            onClick = onSelfStudy,
         )
 
         Spacer(Modifier.height(10.dp))

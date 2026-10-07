@@ -29,6 +29,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.xiqueer.android.data.Overlays
 import com.xiqueer.android.data.PeriodTimes
 import com.xiqueer.android.notify.ClassOccurrence
 import com.xiqueer.android.notify.ClassReminder
@@ -60,8 +61,8 @@ fun ScheduleScreen(
     timetable: Timetable?,
     times: PeriodTimes,
     items: Map<String, String>,
-    /** 调休覆盖层。日程必须按它渲染,否则调了休这里还是老样子。 */
-    shifts: List<com.xiqueer.android.data.Shift> = emptyList(),
+    /** 本地覆盖层。日程必须按它渲染,否则调了休、改了教室这里还是老样子。 */
+    overlays: Overlays = Overlays.Empty,
     /**
      * 下一周课表。只有"明天跨周"时才需要 —— 见 [timetableForDate]。
      * 没传或为 null 时,跨周的明天会显示"下周课表还没加载",而不是误报"没有课"。
@@ -86,8 +87,8 @@ fun ScheduleScreen(
     }
 
     val today = LocalDate.now()
-    val todayCourses = remember(timetable, times, shifts, today) {
-        ScheduleOverrides.forDate(timetable, times, shifts, today)
+    val todayCourses = remember(timetable, times, overlays, today) {
+        ScheduleOverrides.forDate(timetable, times, overlays, today)
     }
     val now = nowMillis
     // 被调走的课不参与"还剩几节"的判断 —— 它今天不上了
@@ -121,8 +122,8 @@ fun ScheduleScreen(
 
     val list = if (showingTomorrow) {
         if (tomorrowTimetable == null) emptyList() else {
-            remember(tomorrowTimetable, times, shifts, tomorrow) {
-                ScheduleOverrides.forDate(tomorrowTimetable, times, shifts, tomorrow)
+            remember(tomorrowTimetable, times, overlays, tomorrow) {
+                ScheduleOverrides.forDate(tomorrowTimetable, times, overlays, tomorrow)
             }
         }
     } else {
@@ -420,7 +421,23 @@ private fun timetableForDate(
  * 放在这里、两页共用一份:按"课名 + 起始节次"匹配。
  * 分成两份实现的话,迟早有一页点不开或多点出不该有的详情。
  */
-internal fun courseOf(t: Timetable, o: ClassOccurrence): com.xiqueer.protocol.Course? =
-    t.days.flatten().firstOrNull {
+/**
+ * 从底表里找出一节课对应的 [Course]。
+ *
+ * ⚠️ **优先用 [ClassOccurrence.courseKey] 精确匹配。**
+ * 课节覆写会把一节课从 5-6 节挪到 3-4 节,而它匹配的 `Course` 仍然写着原来的 `5-6` ——
+ * 按"课名 + 起始节次"去找会**找不到**,表现是"改过位置的课点不开详情",
+ * 而那恰恰是用户最想再点开去改回来/恢复的时候。
+ *
+ * 退化的按名字匹配只留给没有身份键的旧数据(晚自习这类自定义时段没有 Course,
+ * 两条路都会返回 null —— 它本来就不该弹课程详情)。
+ */
+internal fun courseOf(t: Timetable, o: ClassOccurrence): com.xiqueer.protocol.Course? {
+    val all = t.days.flatten()
+    if (o.courseKey.isNotBlank()) {
+        all.firstOrNull { com.xiqueer.android.data.CourseKey.of(it) == o.courseKey }?.let { return it }
+    }
+    return all.firstOrNull {
         it.name == o.courseName && it.periods.contains(o.periodStart.toString())
     }
+}

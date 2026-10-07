@@ -9,7 +9,7 @@ import android.os.Build
 import android.util.Log
 import com.xiqueer.android.BuildConfig
 import com.xiqueer.android.data.PeriodTimesStore
-import com.xiqueer.android.data.ShiftStore
+import com.xiqueer.android.data.Overlays
 import com.xiqueer.android.repository.TimetableCache
 import java.time.LocalDate
 import java.time.LocalDateTime
@@ -97,21 +97,25 @@ object ReminderScheduler {
         alarm.cancel(ongoingIntent(context))
 
         val times = PeriodTimesStore(context).load()
-        if (!times.configured) {
+        val overlaysForGate = Overlays.load(context)
+        // 晚自习自带绝对时间,不依赖作息表 —— 所以"没配作息就什么都不发"
+        // 只对服务端课表成立,不能把用户自己填的时段也一起挡掉
+        val hasSelfStudy = overlaysForGate.selfStudies.any { it.weekdays.isNotEmpty() }
+        if (!times.configured && !hasSelfStudy) {
             // 不知道几点上下课,就既不知道该何时发也不知道何时撤 —— 干脆不发
             Notifications.cancelOngoing(context)
             Log.d(TAG, "period times not configured → no ongoing notification")
             return
         }
         val timetable = TimetableCache.read(context) ?: return
-        val shifts = ShiftStore(context).all()
+        val overlays = overlaysForGate
         val now = System.currentTimeMillis()
         val today = java.time.Instant.ofEpochMilli(now).atZone(ZoneId.systemDefault()).toLocalDate()
 
         // 今明两天:跨午夜的一节课(23:50 下课)也要能正确撤销
         val courses = (0..1)
             .flatMap { d ->
-                ScheduleOverrides.forDate(timetable, times, shifts, today.plusDays(d.toLong()))
+                ScheduleOverrides.forDate(timetable, times, overlays, today.plusDays(d.toLong()))
                     .filter { !it.isMovedOut }
                     .map { it.occurrence }
             }
@@ -178,11 +182,11 @@ object ReminderScheduler {
         // ⚠️ 走 ScheduleOverrides 而不是 ClassReminder:调休之后,
         // "要提醒的课"和"课在哪一天"都变了。直接用底表会出现
         // "课挪走了,闹钟还在原来的日子响"——这是这个功能最坏的 bug。
-        val shifts = ShiftStore(context).all()
+        val overlays = Overlays.load(context)
         val upcoming = ScheduleOverrides.upcoming(
             timetable = timetable,
             times = times,
-            shifts = shifts,
+            overlays = overlays,
             leadMinutes = store.leadMinutes,
             nowMillis = System.currentTimeMillis(),
             horizonMillis = HORIZON_MS,
@@ -190,7 +194,7 @@ object ReminderScheduler {
         val next = upcoming.firstOrNull()
         Log.i(
             TAG,
-            "source=${times.source.label} week=${timetable.currentWeek} shifts=${shifts.size} " +
+            "source=${times.source.label} week=${timetable.currentWeek} shifts=${overlays.shifts.size} " +
                 "upcoming24h=${upcoming.size}" +
                 upcoming.take(3).joinToString("") { " | ${it.courseName} ${it.date} 第${it.periodStart}节 fire=${Date(it.fireAtMillis!!)}" },
         )
@@ -287,12 +291,12 @@ class ClassAlarmReceiver : BroadcastReceiver() {
         val now = System.currentTimeMillis()
 
         if (intent.getBooleanExtra(ReminderScheduler.EXTRA_TEST, false)) {
-            // debug:从真实课表里挑一节演示(也走调休,免得测出来的和真跑的不一样)
-            val shifts = ShiftStore(context).all()
+            // debug:从真实课表里挑一节演示(也走覆盖层,免得测出来的和真跑的不一样)
+            val overlays = Overlays.load(context)
             val demo = TimetableCache.read(context)?.let { t ->
-                ScheduleOverrides.forDate(t, times, shifts, LocalDate.now()).firstOrNull()?.occurrence
+                ScheduleOverrides.forDate(t, times, overlays, LocalDate.now()).firstOrNull()?.occurrence
                     ?: ScheduleOverrides.forDate(
-                        t, times, shifts, ClassReminder.weekMonday(t) ?: LocalDate.now(),
+                        t, times, overlays, ClassReminder.weekMonday(t) ?: LocalDate.now(),
                     ).firstOrNull()?.occurrence
             }
             if (demo != null) {
@@ -312,7 +316,7 @@ class ClassAlarmReceiver : BroadcastReceiver() {
                 val justDue = ScheduleOverrides.upcoming(
                     timetable = timetable,
                     times = times,
-                    shifts = ShiftStore(context).all(),
+                    overlays = Overlays.load(context),
                     leadMinutes = store.leadMinutes,
                     nowMillis = now - 5 * 60_000L,
                     horizonMillis = 5 * 60_000L,
@@ -340,10 +344,11 @@ class DigestAlarmReceiver : BroadcastReceiver() {
 
         val timetable = TimetableCache.read(context)
         // 作息表已配置时,摘要也带上每节的开始时间(P6 导入后应当立刻体现在推送里)。
-        // **并且走调休**:不然调休当天早上推的还是原来那天的课。
+        // **并且走覆盖层**:不然调休当天早上推的还是原来那天的课,
+        // 改了教室/节次的那一节也不会体现在摘要里。
         val courses = if (timetable == null) emptyList()
         else ScheduleOverrides
-            .forDate(timetable, store.load(), ShiftStore(context).all(), today)
+            .forDate(timetable, store.load(), Overlays.load(context), today)
             .filter { !it.isMovedOut }   // 被调走的课不再算"今天要上"
             .map { it.occurrence }
         // 没课也发一条 —— 让用户确信提醒是活的,而不是静默失效

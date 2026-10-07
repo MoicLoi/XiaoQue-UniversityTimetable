@@ -29,8 +29,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.xiqueer.android.data.Overlays
 import com.xiqueer.android.data.PeriodTimes
-import com.xiqueer.android.data.Shift
 import com.xiqueer.android.notify.ScheduleOverrides
 import com.xiqueer.android.ui.glass.GlassSurface
 import com.xiqueer.android.ui.glass.GlassTokens
@@ -65,6 +65,14 @@ private data class GridCell(
     val movedOut: LocalDate? = null,
     /** 非 null = 从那天调来。 */
     val movedIn: LocalDate? = null,
+    /**
+     * 是不是自定义时段(晚自习)—— 它不属于服务端的第 N 节。
+     *
+     * 它天然不可点:自定义时段在底表里没有对应的 [Course],[GridCell.course] 是 null,
+     * 而点击本来就在 `course != null` 时才绑定。所以它是**描述性**字段,
+     * 用于区分显示与后续判断,不是可点性的开关。
+     */
+    val custom: Boolean = false,
 )
 
 private data class Placed(val cell: GridCell, val span: Int, val lane: Int, val lanes: Int)
@@ -121,7 +129,7 @@ private fun layoutDay(cells: List<GridCell>, maxPeriod: Int): List<Placed> {
 private fun weekCells(
     t: Timetable,
     times: PeriodTimes,
-    shifts: List<Shift>,
+    overlays: Overlays,
 ): List<List<GridCell>> {
     if (t.weekStart == null) {
         return (0..6).map { day ->
@@ -130,7 +138,7 @@ private fun weekCells(
             }
         }
     }
-    return ScheduleOverrides.week(t, times, shifts).map { col ->
+    return ScheduleOverrides.week(t, times, overlays).map { col ->
         col.map { e ->
             val o = e.occurrence
             GridCell(
@@ -141,6 +149,7 @@ private fun weekCells(
                 room = o.room,
                 movedOut = e.movedTo,
                 movedIn = e.movedFrom,
+                custom = o.isCustom,
             )
         }
     }
@@ -153,8 +162,8 @@ fun TimetableScreen(
     modifier: Modifier = Modifier,
     /** 真实本周(翻页时不变),用来决定要不要显示「回到本周」。 */
     currentWeek: Int = 0,
-    /** 调休覆盖层。网格必须按它渲染,否则调了休这里还是老样子。 */
-    shifts: List<Shift> = emptyList(),
+    /** 本地覆盖层。网格必须按它渲染,否则调了休、改了教室这里还是老样子。 */
+    overlays: Overlays = Overlays.Empty,
     onCourseClick: (Course) -> Unit = {},
     onPrevWeek: () -> Unit = {},
     onNextWeek: () -> Unit = {},
@@ -168,6 +177,8 @@ fun TimetableScreen(
 
     val today = remember(timetable.weekStart) { todayColumnIndex(timetable) }
     val maxPeriod = maxOf(1, timetable.maxPeriod)
+    // 行数含晚自习等自定义时段 —— 网格与导出图必须用同一个数算高度
+    val rows = ScheduleOverrides.gridRows(timetable, overlays)
 
     Column(modifier.fillMaxSize().padding(top = 6.dp)) {
         WeekHeaderCard(
@@ -189,7 +200,7 @@ fun TimetableScreen(
         ) {
             DayHeaderRow(timetable, today)
             Spacer(Modifier.height(4.dp))
-            GridBody(timetable, times, shifts, maxPeriod, today, onCourseClick)
+            GridBody(timetable, times, overlays, maxPeriod, rows, today, onCourseClick)
             Spacer(Modifier.height(16.dp))
         }
     }
@@ -337,33 +348,48 @@ private fun DayHeaderRow(t: Timetable, today: Int) {
 private fun GridBody(
     t: Timetable,
     times: PeriodTimes,
-    shifts: List<Shift>,
+    overlays: Overlays,
     maxPeriod: Int,
+    rows: Int,
     today: Int,
     onClick: (Course) -> Unit,
 ) {
-    // 整周只算一次:7 列共用同一份 effective 数据(调休只在这里生效一次)
-    val week = remember(t, times, shifts) { weekCells(t, times, shifts) }
-    Row(Modifier.fillMaxWidth().height(ROW_HEIGHT * maxPeriod)) {
-        // 左侧节次栏:节次号;配置了作息表才显示开始时间
+    // 整周只算一次:7 列共用同一份 effective 数据(覆盖层只在这里生效一次)
+    val week = remember(t, times, overlays) { weekCells(t, times, overlays) }
+    Row(Modifier.fillMaxWidth().height(ROW_HEIGHT * rows)) {
+        // 左侧节次栏:节次号;配置了作息表才显示开始时间。
+        // 最后几行是自定义时段(晚自习)—— 它们没有节次号,改显示名字与开始时间。
         Column(Modifier.width(GUTTER_WIDTH)) {
-            for (p in 1..maxPeriod) {
+            for (p in 1..rows) {
                 Column(
                     Modifier.height(ROW_HEIGHT).fillMaxWidth(),
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.Center,
                 ) {
-                    Text("$p", color = XqColors.TextSecondary, fontSize = 12.sp)
-                    PeriodText.startLabel(times, p)?.let {
-                        Text(it, color = XqColors.TextTertiary, fontSize = 8.sp)
+                    if (p <= maxPeriod) {
+                        Text("$p", color = XqColors.TextSecondary, fontSize = 12.sp)
+                        PeriodText.startLabel(times, p)?.let {
+                            Text(it, color = XqColors.TextTertiary, fontSize = 8.sp)
+                        }
+                    } else {
+                        val slot = overlays.selfStudies.getOrNull(p - maxPeriod - 1)
+                        if (slot != null) {
+                            Text(
+                                slot.label.take(2),
+                                color = XqColors.TextSecondary,
+                                fontSize = 9.sp,
+                                maxLines = 1,
+                            )
+                            Text(slot.start, color = XqColors.TextTertiary, fontSize = 8.sp)
+                        }
                     }
                 }
             }
         }
 
         for (day in 0..6) {
-            val placed = remember(week, day, maxPeriod) {
-                layoutDay(week.getOrElse(day) { emptyList() }, maxPeriod)
+            val placed = remember(week, day, rows) {
+                layoutDay(week.getOrElse(day) { emptyList() }, rows)
             }
             BoxWithConstraints(
                 Modifier
@@ -375,7 +401,7 @@ private fun GridBody(
                     ),
             ) {
                 val colW = maxWidth
-                for (p in 1..maxPeriod) {
+                for (p in 1..rows) {
                     Box(
                         Modifier
                             .offset(y = ROW_HEIGHT * (p - 1))

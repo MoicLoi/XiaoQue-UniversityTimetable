@@ -23,21 +23,25 @@ import com.xiqueer.android.ui.glass.GlassTokens
 /**
  * 导出格式选择。
  *
- * 三者都走系统分享面板:用户可以"存到文件"、发微信、发邮件 —— 我们不知道也不用知道。
+ * 都走系统分享面板:用户可以"存到文件"、发微信、发邮件 —— 我们不知道也不用知道。
  *
- * 日历那一项在没填作息时**禁用并说明原因**:不知道几点上课就排不出日历事件,
- * 与其导出一个时间全是猜的日历,不如别给。
+ * 日历那一项在**既没填作息、也没配晚自习**时禁用并说明原因:不知道几点上课就排不出
+ * 服务端课程的事件。但只要配了晚自习就仍然可用 —— 晚自习的时间是用户自己填的,
+ * 本身就是绝对时刻,不依赖作息表。早先这里只认作息表,结果把晚自习的日历导出也一并挡掉了。
  */
 @Composable
 fun BoxScope.ExportSheet(
     visible: Boolean,
     hasPeriodTimes: Boolean,
+    /** 是否配了至少一条启用了的自定义时段(晚自习)。 */
+    hasSelfStudy: Boolean = false,
     onDismiss: () -> Unit,
     onImage: () -> Unit,
     onExcel: () -> Unit,
     onCsv: () -> Unit,
     onCalendar: () -> Unit,
 ) {
+    val calendarOk = hasPeriodTimes || hasSelfStudy
     GlassSheet(visible = visible, onDismiss = onDismiss) {
         Text("导出课表", color = XqColors.TextPrimary, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
         Spacer(Modifier.height(4.dp))
@@ -66,12 +70,12 @@ fun BoxScope.ExportSheet(
 
         ExportOption(
             title = "日历(.ics)",
-            desc = if (hasPeriodTimes) {
-                "每周每节课一个事件,导入手机日历后由系统提醒(提前 20 分钟)"
-            } else {
-                "需要先填作息时间 —— 不知道几点上课就排不出日历事件"
+            desc = when {
+                hasPeriodTimes -> "每周每节课一个事件,导入手机日历后由系统提醒(提前 20 分钟)"
+                hasSelfStudy -> "只导出晚自习事件;填了作息时间才会连白天的课一起导出"
+                else -> "需要先填作息时间 —— 不知道几点上课就排不出日历事件"
             },
-            enabled = hasPeriodTimes,
+            enabled = calendarOk,
         ) { onDismiss(); onCalendar() }
 
         Spacer(Modifier.height(8.dp))

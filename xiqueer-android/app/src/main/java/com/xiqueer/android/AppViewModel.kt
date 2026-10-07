@@ -75,10 +75,20 @@ data class UiState(
     val moreMenuOpen: Boolean = false,
     /** 「上课携带」编辑页是否展开。 */
     val itemsSheetOpen: Boolean = false,
-    /** 调休列表(本地覆盖层)。 */
-    val shifts: List<com.xiqueer.android.data.Shift> = emptyList(),
+    /**
+     * **本地覆盖层**:调休 + 课节覆写 + 晚自习。
+     *
+     * 打成一个值而不是三个独立字段,是因为它们的消费方是同一个
+     * [com.xiqueer.android.notify.ScheduleOverrides] —— 分成三个字段后,
+     * 每加一层就要在 8+ 个传参处逐个补,漏一处的症状是"某一处显示的还是老课表"。
+     */
+    val overlays: com.xiqueer.android.data.Overlays = com.xiqueer.android.data.Overlays.Empty,
     /** 调休管理面板是否展开。 */
     val shiftSheetOpen: Boolean = false,
+    /** 「课节改动」编辑面板是否展开(改某一节的教室 / 节次)。 */
+    val courseEditOpen: Boolean = false,
+    /** 晚自习设置面板是否展开。 */
+    val selfStudySheetOpen: Boolean = false,
     /** 上课悬浮窗开关(默认关,且要系统授权)。 */
     val overlayEnabled: Boolean = false,
     /** 系统是否已经给了「显示在其他应用上层」权限。 */
@@ -183,7 +193,17 @@ class AppViewModel(
     private val schoolDir = com.xiqueer.android.data.SchoolDirectory(app)
     private val itemsStore = com.xiqueer.android.data.CourseItemsStore(app)
     private val shiftStore = com.xiqueer.android.data.ShiftStore(app)
+    private val courseOverrideStore = com.xiqueer.android.data.CourseOverrideStore(app)
+    private val selfStudyStore = com.xiqueer.android.data.SelfStudyStore(app)
     private val overlayStore = com.xiqueer.android.data.OverlaySettingsStore(app)
+
+    /** 从三个 Store 读齐覆盖层。**只在这里拼**,别处不许各自拼一份。 */
+    private fun readOverlays(): com.xiqueer.android.data.Overlays =
+        com.xiqueer.android.data.Overlays(
+            shifts = shiftStore.all(),
+            courseOverrides = courseOverrideStore.all(),
+            selfStudies = selfStudyStore.all(),
+        )
 
     /** 工具的**唯一**实例 —— 执行门就挂在这里,别在别处再造一个。 */
     private val tools = ToolRegistry(
@@ -191,13 +211,16 @@ class AppViewModel(
         periods = periodStore,
         watch = watchStore,
         shifts = shiftStore,
+        // 读课表的工具必须看到和界面同一份覆盖层,否则 AI 会说"课在 H502"
+        // 而屏幕上写的是 H303
+        overlays = { readOverlays() },
         applyWatch = { on ->
             val app = getApplication<Application>()
             if (on) SelectionWatch.enable(app) else SelectionWatch.disable(app)
         },
         // 调休改了就必须重排提醒(工具层没有 Context,副作用在这里落地)
         onScheduleChanged = {
-            state = state.copy(shifts = shiftStore.all())
+            state = state.copy(overlays = readOverlays())
             rescheduleReminders()
         },
     )
@@ -235,7 +258,7 @@ class AppViewModel(
      */
     private fun withLocalState(s: UiState): UiState = s.copy(
         courseItems = itemsStore.all(),
-        shifts = shiftStore.all(),
+        overlays = readOverlays(),
         overlayEnabled = overlayStore.enabled,
         periodTimes = periodStore.load(),
         agentConfig = agentStore.load(),
@@ -412,16 +435,78 @@ class AppViewModel(
     fun addShift(from: String, to: String, courses: List<String>?): String {
         val shift = shiftStore.add(from, to, courses)
             ?: return "没添加:日期格式不对、起止是同一天,或者这条调休已经存在"
-        state = state.copy(shifts = shiftStore.all())
+        state = state.copy(overlays = readOverlays())
         rescheduleReminders()
         return "已记录调休:${shift.describe()}"
     }
 
     fun removeShift(id: String) {
         if (shiftStore.remove(id)) {
-            state = state.copy(shifts = shiftStore.all())
+            state = state.copy(overlays = readOverlays())
             rescheduleReminders()
         }
+    }
+
+    // ---- 课节覆写(改某一节的教室 / 节次)----
+
+    /**
+     * 写入/更新某个课节的覆写。
+     *
+     * [week] 用**底表那一周的周次**(`timetable.currentWeek`),不是"真实本周" ——
+     * 用户在课表页翻到第 5 周去改,改的就必须是第 5 周那一节。
+     *
+     * `room` / `periods` 都为 null 等价于"恢复",直接清掉这条覆写。
+     *
+     * @return 人话回执,直接显示给用户
+     */
+    fun setCourseOverride(
+        week: Int,
+        weekday: Int,
+        courseKey: String,
+        room: String?,
+        periods: String?,
+    ): String {
+        if (week <= 0) return "改不了:课表还没加载出周次"
+        val entry = courseOverrideStore.put(week, weekday, courseKey, room, periods)
+        state = state.copy(overlays = readOverlays())
+        rescheduleReminders()
+        return if (entry == null) "已恢复这一节" else "已记录课节改动:${entry.describe()}"
+    }
+
+    /** 清掉某一节的覆写(等于"恢复到原课节位置")。 */
+    fun clearCourseOverride(week: Int, weekday: Int, courseKey: String): String {
+        val removed = courseOverrideStore.remove(week, weekday, courseKey)
+        state = state.copy(overlays = readOverlays())
+        rescheduleReminders()
+        return if (removed) "已恢复这一节" else "这一节本来就没有改动"
+    }
+
+    // ---- 晚自习(自定义时段)----
+
+    /** 覆盖式保存晚自习设置。传空列表 = 全部关掉。 */
+    fun saveSelfStudies(slots: List<com.xiqueer.android.data.SelfStudySlot>): String {
+        val saved = selfStudyStore.save(slots)
+        state = state.copy(overlays = readOverlays())
+        rescheduleReminders()
+        return if (saved.isEmpty()) "已关闭晚自习" else "已保存晚自习:${saved.size} 条"
+    }
+
+    fun openSelfStudySheet() {
+        state = state.copy(selfStudySheetOpen = true)
+    }
+
+    fun closeSelfStudySheet() {
+        state = state.copy(selfStudySheetOpen = false)
+    }
+
+    // ---- 课节改动编辑面板 ----
+
+    fun openCourseEdit() {
+        state = state.copy(courseEditOpen = true)
+    }
+
+    fun closeCourseEdit() {
+        state = state.copy(courseEditOpen = false)
     }
 
     fun openShiftSheet() {
@@ -488,13 +573,35 @@ class AppViewModel(
     }
 
     /** 按 key 从当前课表里找回课程对象 —— 只存 key 是为了不给 Bundle 塞复杂对象。 */
-    fun selectedCourse(): Course? {
+    fun selectedCourse(): Course? = selectedCourseSlot()?.second
+
+    /**
+     * 选中的课 + 它在**星期几**(0=周一)。
+     *
+     * 课节覆写要定位到"第几周 + 星期几 + 这一节",只给一个 [Course] 是不够的 ——
+     * 同一门课可能一周上两次,只有星期几能把它们分开。
+     */
+    fun selectedCourseSlot(): Pair<Int, Course>? {
         val key = state.selectedCourseKey ?: return null
         val days = state.timetable?.days ?: return null
-        return days.flatten().firstOrNull { courseKey(it) == key }
+        for (d in days.indices) {
+            val hit = days[d].firstOrNull { courseKey(it) == key }
+            if (hit != null) return d to hit
+        }
+        return null
     }
 
-    private fun courseKey(c: Course) = "${c.name}|${c.periods}|${c.room}|${c.teacher}"
+    /** 当前选中那一节已存的覆写;没有则 null。给「课节改动」面板显示与比对用。 */
+    fun selectedOverride(): com.xiqueer.android.data.CourseOverride? {
+        val (weekday, course) = selectedCourseSlot() ?: return null
+        val week = state.timetable?.currentWeek ?: return null
+        val k = courseKey(course)
+        return state.overlays.courseOverrides.firstOrNull {
+            it.week == week && it.weekday == weekday && it.courseKey == k
+        }
+    }
+
+    private fun courseKey(c: Course) = com.xiqueer.android.data.CourseKey.of(c)
 
     // ---- 登录 / 登出 ----
 

@@ -1,5 +1,7 @@
 package com.xiqueer.android.export
 
+import com.xiqueer.android.data.CourseKey
+import com.xiqueer.android.data.Overlays
 import com.xiqueer.android.data.PeriodTimes
 import com.xiqueer.protocol.Course
 import com.xiqueer.protocol.Timetable
@@ -41,6 +43,35 @@ object TimetableExport {
 
     private val WEEKDAYS = listOf("周一", "周二", "周三", "周四", "周五", "周六", "周日")
 
+    // ------------------------------------------------------------------ 覆盖层
+
+    /**
+     * 把**课节覆写**打到课表上,返回"当前这一周实际要上的课"。底表永不被修改。
+     *
+     * 导出的课表本来就是"正在看的那一周"(csv/xlsx 都是),所以这里只需按
+     * `t.currentWeek` 找覆写 —— 与网格页用的是同一套 `(周次, 星期, 底表身份)` 匹配。
+     *
+     * 只做覆写、不掺晚自习:晚自习没有"周次/节次"这些字段,它在各导出里有各自的
+     * 呈现方式(网格多一行、明细多一条、日历多一串事件),硬塞进 [Timetable] 反而麻烦。
+     */
+    internal fun effective(t: Timetable, overlays: Overlays): Timetable {
+        if (overlays.courseOverrides.isEmpty()) return t
+        val week = t.currentWeek
+        val days = t.days.mapIndexed { day, list ->
+            list.map { c ->
+                val hit = overlays.courseOverrides.firstOrNull {
+                    it.week == week && it.weekday == day && it.courseKey == CourseKey.of(c)
+                }
+                if (hit == null) c else hit.applyTo(c)
+            }
+        }
+        return t.copy(days = days)
+    }
+
+    /** 网格总行数 = 服务端节次 + 自定义时段(晚自习)条数。与 [grid] 必须一致。 */
+    private fun rowsOf(t: Timetable, overlays: Overlays): Int =
+        maxOf(1, t.maxPeriod) + overlays.selfStudies.size
+
     // ------------------------------------------------------------------ 网格
 
     /**
@@ -50,14 +81,15 @@ object TimetableExport {
      * 这里刻意不使用 UI 那套"泳道"布局:导出的目标是"看得全",
      * 不是"排得好看"。
      */
-    private fun grid(t: Timetable): Array<Array<Cell?>> {
-        val maxPeriod = maxOf(1, t.maxPeriod)
-        val g = Array(maxPeriod) { arrayOfNulls<Cell>(7) }
+    private fun grid(t: Timetable, overlays: Overlays): Array<Array<Cell?>> {
+        val serverPeriods = maxOf(1, t.maxPeriod)
+        val rows = rowsOf(t, overlays)
+        val g = Array(rows) { arrayOfNulls<Cell>(7) }
         for (day in 0..6) {
             for (c in t.days.getOrElse(day) { emptyList() }) {
                 val (s, e) = parsePeriods(c.periods) ?: continue
-                if (s !in 1..maxPeriod) continue
-                val span = (e - s + 1).coerceAtMost(maxPeriod - s + 1)
+                if (s !in 1..serverPeriods) continue
+                val span = (e - s + 1).coerceAtMost(serverPeriods - s + 1)
                 val cell = g[s - 1][day]
                 if (cell == null) {
                     g[s - 1][day] = Cell(cellText(c), span)
@@ -67,8 +99,27 @@ object TimetableExport {
                 }
             }
         }
+        // 晚自习接在最后一节之后,一条时段占一行(与课表网格、导出图同一套排法)
+        overlays.selfStudies.forEachIndexed { i, slot ->
+            val row = serverPeriods + i
+            if (row !in g.indices) return@forEachIndexed
+            val text = slot.label + "\n" + slot.timeLabel()
+            for (day in 0..6) if (slot.enabledOn(day)) g[row][day] = Cell(text, 1)
+        }
         return g
     }
+
+    /** 网格左侧那一列(节次号 / 晚自习名)。 */
+    private fun gutterLabel(p: Int, serverPeriods: Int, times: PeriodTimes, overlays: Overlays): String =
+        if (p <= serverPeriods) {
+            buildString {
+                append(p)
+                times.startOf(p)?.let { append('\n').append(it.take(5)) }
+            }
+        } else {
+            val slot = overlays.selfStudies.getOrNull(p - serverPeriods - 1)
+            if (slot == null) "" else slot.label + "\n" + slot.start
+        }
 
     private fun cellText(c: Course): String = buildString {
         append(c.name)
@@ -80,12 +131,21 @@ object TimetableExport {
     // ------------------------------------------------------------------ CSV
 
     /** 一行一门课的规整数据。带 BOM,Excel 打开不乱码。 */
-    fun csv(t: Timetable): ByteArray {
+    fun csv(t: Timetable, overlays: Overlays): ByteArray {
+        val e = effective(t, overlays)
         val sb = StringBuilder()
         sb.append(DETAIL_HEADER.joinToString(",")).append("\r\n")
-        for (c in allCourses(t)) {
+        for (c in allCourses(e)) {
             sb.append(
                 listOf(c.name, c.teacher, c.room, c.periods, c.weeks, c.credit, c.code)
+                    .joinToString(",") { csvField(it) },
+            ).append("\r\n")
+        }
+        // 晚自习也各占一条 —— 它是"真的一节课",导出里少了它就对不上了。
+        // 教师/学分/课程号服务端没有,留空而不是编一个。
+        overlays.selfStudies.forEach { slot ->
+            sb.append(
+                listOf(slot.label, "", "", slot.timeLabel(), slot.weekdayLabel(), "", "")
                     .joinToString(",") { csvField(it) },
             ).append("\r\n")
         }
@@ -107,9 +167,11 @@ object TimetableExport {
      * 只用 `inlineStr` 写字,不建 `sharedStrings.xml` —— 少一个部件、少一层间接,
      * 对几百行的课表没有任何损失。
      */
-    fun xlsx(t: Timetable, times: PeriodTimes): ByteArray {
-        val maxPeriod = maxOf(1, t.maxPeriod)
-        val g = grid(t)
+    fun xlsx(t: Timetable, times: PeriodTimes, overlays: Overlays): ByteArray {
+        val e = effective(t, overlays)
+        val serverPeriods = maxOf(1, e.maxPeriod)
+        val rows = rowsOf(e, overlays)
+        val g = grid(e, overlays)
 
         // ---- sheet1:课表网格 ----
         val s1 = StringBuilder()
@@ -124,14 +186,10 @@ object TimetableExport {
         s1.append("</row>")
 
         val merges = ArrayList<String>()
-        for (p in 1..maxPeriod) {
+        for (p in 1..rows) {
             val r = p + 1
             s1.append("""<row r="$r" ht="42" customHeight="1">""")
-            val label = buildString {
-                append(p)
-                times.startOf(p)?.let { append('\n').append(it.take(5)) }
-            }
-            s1.append(cellStr("A$r", label, STYLE_HEADER))
+            s1.append(cellStr("A$r", gutterLabel(p, serverPeriods, times, overlays), STYLE_HEADER))
             for (d in 0..6) {
                 val cell = g[p - 1][d]
                 val ref = colLetter(d + 2) + r
@@ -162,11 +220,16 @@ object TimetableExport {
         s2.append("""<row r="1" ht="20" customHeight="1">""")
         DETAIL_HEADER.forEachIndexed { i, h -> s2.append(cellStr(colLetter(i + 1) + "1", h, STYLE_HEADER)) }
         s2.append("</row>")
-        allCourses(t).forEachIndexed { i, c ->
+        // 明细 = 服务端课程 + 自定义时段(晚自习)。两者列数相同,拼在一起即可。
+        val detailRows = allCourses(e).map {
+            listOf(it.name, it.teacher, it.room, it.periods, it.weeks, it.credit, it.code)
+        } + overlays.selfStudies.map {
+            listOf(it.label, "", "", it.timeLabel(), it.weekdayLabel(), "", "")
+        }
+        detailRows.forEachIndexed { i, vals ->
             val r = i + 2
             s2.append("""<row r="$r">""")
-            listOf(c.name, c.teacher, c.room, c.periods, c.weeks, c.credit, c.code)
-                .forEachIndexed { j, v -> s2.append(cellStr(colLetter(j + 1) + r, v, STYLE_BODY)) }
+            vals.forEachIndexed { j, v -> s2.append(cellStr(colLetter(j + 1) + r, v, STYLE_BODY)) }
             s2.append("</row>")
         }
         s2.append("</sheetData>")
@@ -223,8 +286,11 @@ object TimetableExport {
      * 两者差 `currentWeek - 1` 周,结果每个日历事件都晚了 3 周。
      * 所以现在由本函数自己从课表模型里取,不给调用方传错的机会。
      */
-    fun ics(t: Timetable, times: PeriodTimes): String? {
-        if (!times.configured) return null
+    fun ics(t: Timetable, times: PeriodTimes, overlays: Overlays): String? {
+        // 晚自习的时间是用户自己填的绝对时刻,不依赖作息表 ——
+        // 所以"没配作息就导不出"这条只对服务端课表成立。
+        val hasSelfStudy = overlays.selfStudies.any { it.weekdays.isNotEmpty() }
+        if (!times.configured && !hasSelfStudy) return null
         val monday0 = t.termStartMonday?.let { runCatching { LocalDate.parse(it) }.getOrNull() }
             ?: return null
         val stamp = LocalDate.now().format(DateTimeFormatter.ofPattern("yyyyMMdd")) + "T000000Z"
@@ -237,24 +303,34 @@ object TimetableExport {
         sb.append("METHOD:PUBLISH\r\n")
         sb.append("X-WR-CALNAME:课表\r\n")
 
+        val dt = DateTimeFormatter.ofPattern("yyyyMMdd")
+
         for (day in 0..6) {
             for (c in t.days.getOrElse(day) { emptyList() }) {
-                val (s, e) = parsePeriods(c.periods) ?: continue
-                val startLabel = times.startOf(s) ?: continue
-                val startTime = runCatching { LocalTime.parse(startLabel) }.getOrNull() ?: continue
-                val endLabel = times.endOf(e) ?: startLabel
-                val endTime = runCatching { LocalTime.parse(endLabel) }.getOrNull() ?: startTime
-
+                // 覆写按**周**生效,所以"用哪套节次/教室"必须放进周次循环里算 ——
+                // 放到循环外面就等于让一整门课都用同一个覆写,那是错的。
+                val key = CourseKey.of(c)
                 for (w in weeksOf(c.weeks, t.maxWeek)) {
+                    val hit = overlays.courseOverrides.firstOrNull {
+                        it.week == w && it.weekday == day && it.courseKey == key
+                    }
+                    val periods = hit?.periods ?: c.periods
+                    val room = hit?.room ?: c.room
+                    val (s, e) = parsePeriods(periods) ?: continue
+                    // 没配作息时 startOf 为 null —— 服务端那部分排不出事件,跳过(晚自习照排)
+                    val startLabel = times.startOf(s) ?: continue
+                    val startTime = runCatching { LocalTime.parse(startLabel) }.getOrNull() ?: continue
+                    val endLabel = times.endOf(e) ?: startLabel
+                    val endTime = runCatching { LocalTime.parse(endLabel) }.getOrNull() ?: startTime
+
                     val date = monday0.plusWeeks((w - 1).toLong()).plusDays(day.toLong())
-                    val dt = DateTimeFormatter.ofPattern("yyyyMMdd")
                     sb.append("BEGIN:VEVENT\r\n")
                     sb.append("UID:${uid(c, day, w)}\r\n")
                     sb.append("DTSTAMP:$stamp\r\n")
                     sb.append("DTSTART;VALUE=DATE-TIME:${date.format(dt)}T${startTime.format(HM)}00\r\n")
                     sb.append("DTEND;VALUE=DATE-TIME:${date.format(dt)}T${endTime.format(HM)}00\r\n")
                     sb.append("SUMMARY:${icsText(c.name)}\r\n")
-                    if (c.room.isNotBlank()) sb.append("LOCATION:${icsText(c.room)}\r\n")
+                    if (room.isNotBlank()) sb.append("LOCATION:${icsText(room)}\r\n")
                     if (c.teacher.isNotBlank()) sb.append("DESCRIPTION:${icsText(c.teacher)}\r\n")
                     // 提前 20 分钟提醒,与 App 内默认一致
                     sb.append("BEGIN:VALARM\r\nACTION:DISPLAY\r\nTRIGGER:-PT20M\r\n")
@@ -263,6 +339,29 @@ object TimetableExport {
                 }
             }
         }
+
+        // 晚自习:每个学期周 × 每个启用的星期各一个事件。
+        // UID 用时段 id 而不是名字 —— 改个名字不该让日历里多出一串重复事件。
+        for (slot in overlays.selfStudies) {
+            if (slot.weekdays.isEmpty()) continue
+            val sTime = runCatching { LocalTime.parse(slot.start) }.getOrNull() ?: continue
+            val eTime = slot.end?.let { runCatching { LocalTime.parse(it) }.getOrNull() } ?: sTime
+            for (w in 1..maxOf(1, t.maxWeek)) {
+                for (day in slot.weekdays) {
+                    val date = monday0.plusWeeks((w - 1).toLong()).plusDays(day.toLong())
+                    sb.append("BEGIN:VEVENT\r\n")
+                    sb.append("UID:xq-ss-${Integer.toHexString("${slot.id}|$day|$w".hashCode())}@xiqueer\r\n")
+                    sb.append("DTSTAMP:$stamp\r\n")
+                    sb.append("DTSTART;VALUE=DATE-TIME:${date.format(dt)}T${sTime.format(HM)}00\r\n")
+                    sb.append("DTEND;VALUE=DATE-TIME:${date.format(dt)}T${eTime.format(HM)}00\r\n")
+                    sb.append("SUMMARY:${icsText(slot.label)}\r\n")
+                    sb.append("BEGIN:VALARM\r\nACTION:DISPLAY\r\nTRIGGER:-PT20M\r\n")
+                    sb.append("DESCRIPTION:${icsText(slot.label)}\r\nEND:VALARM\r\n")
+                    sb.append("END:VEVENT\r\n")
+                }
+            }
+        }
+
         sb.append("END:VCALENDAR\r\n")
         return sb.toString()
     }

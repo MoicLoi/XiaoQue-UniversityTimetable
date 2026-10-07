@@ -45,6 +45,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.xiqueer.android.export.ExportShare
 import com.xiqueer.android.ui.AgentPanel
 import com.xiqueer.android.ui.CourseDetailOverlay
+import com.xiqueer.android.ui.CourseEditSheet
 import com.xiqueer.android.ui.CourseItemsSheet
 import com.xiqueer.android.ui.ExamsScreen
 import com.xiqueer.android.ui.ExportSheet
@@ -56,6 +57,7 @@ import com.xiqueer.android.ui.NoticesScreen
 import com.xiqueer.android.ui.PeriodTimesNotice
 import com.xiqueer.android.ui.ScheduleScreen
 import com.xiqueer.android.ui.SchoolPickerSheet
+import com.xiqueer.android.ui.SelfStudySheet
 import com.xiqueer.android.ui.SettingsSheet
 import com.xiqueer.android.ui.ShiftSheet
 import com.xiqueer.android.ui.StudyPlanScreen
@@ -142,10 +144,10 @@ private fun AppRoot(vm: AppViewModel = viewModel()) {
             val art = withContext(Dispatchers.IO) {
                 runCatching {
                     when (kind) {
-                        "png" -> ExportShare.pngArtifact(t, periodTimes, vm.state.shifts, t.currentWeek)
-                        "xlsx" -> ExportShare.xlsxArtifact(t, periodTimes)
-                        "csv" -> ExportShare.csvArtifact(t, t.currentWeek)
-                        else -> ExportShare.icsArtifact(t, periodTimes)
+                        "png" -> ExportShare.pngArtifact(t, periodTimes, vm.state.overlays, t.currentWeek)
+                        "xlsx" -> ExportShare.xlsxArtifact(t, periodTimes, vm.state.overlays)
+                        "csv" -> ExportShare.csvArtifact(t, vm.state.overlays, t.currentWeek)
+                        else -> ExportShare.icsArtifact(t, periodTimes, vm.state.overlays)
                     }
                 }.getOrNull()
             }
@@ -218,7 +220,7 @@ private fun AppRoot(vm: AppViewModel = viewModel()) {
                             timetable = timetable,
                             times = periodTimes,
                             items = vm.state.courseItems,
-                            shifts = vm.state.shifts,
+                            overlays = vm.state.overlays,
                             nextWeekTimetable = vm.state.nextWeekTimetable,
                             onCourseClick = vm::openCourse,
                         )
@@ -226,7 +228,7 @@ private fun AppRoot(vm: AppViewModel = viewModel()) {
                             timetable = timetable,
                             times = periodTimes,
                             currentWeek = vm.state.currentWeek,
-                            shifts = vm.state.shifts,
+                            overlays = vm.state.overlays,
                             onCourseClick = vm::openCourse,
                             onPrevWeek = vm::prevWeek,
                             onNextWeek = vm::nextWeek,
@@ -254,7 +256,69 @@ private fun AppRoot(vm: AppViewModel = viewModel()) {
         CourseDetailOverlay(
             course = selected,
             times = periodTimes,
+            override = vm.selectedOverride(),
             onDismiss = vm::closeCourse,
+        )
+
+        // 「课节改动」浮空按钮:点开某一节课之后才出现。
+        // 观感与 AI 按钮同一套(同样 0.30 透明度),但叠在它**上方** ——
+        // 两个圆钮落在同一个角上会互相遮住。AI 面板展开时让位。
+        val slot = vm.selectedCourseSlot()
+        if (loggedIn && slot != null && !vm.state.agent.open) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(end = 16.dp, bottom = 140.dp)
+                    .height(46.dp)
+                    .clip(RoundedCornerShape(50))
+                    .background(XqColors.Accent.copy(alpha = 0.30f))
+                    .clickable(onClick = vm::openCourseEdit)
+                    .padding(horizontal = 18.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    "课节改动",
+                    color = XqColors.AccentSoft,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
+        }
+
+        CourseEditSheet(
+            visible = vm.state.courseEditOpen,
+            course = slot?.second,
+            week = timetable?.currentWeek ?: 0,
+            weekday = slot?.first ?: 0,
+            override = vm.selectedOverride(),
+            onSave = { room, periods ->
+                val s = vm.selectedCourseSlot()
+                if (s == null) "没选中课"
+                else vm.setCourseOverride(
+                    week = timetable?.currentWeek ?: 0,
+                    weekday = s.first,
+                    courseKey = com.xiqueer.android.data.CourseKey.of(s.second),
+                    room = room,
+                    periods = periods,
+                )
+            },
+            onRestore = {
+                val s = vm.selectedCourseSlot()
+                if (s == null) "没选中课"
+                else vm.clearCourseOverride(
+                    week = timetable?.currentWeek ?: 0,
+                    weekday = s.first,
+                    courseKey = com.xiqueer.android.data.CourseKey.of(s.second),
+                )
+            },
+            onDismiss = vm::closeCourseEdit,
+        )
+
+        SelfStudySheet(
+            visible = vm.state.selfStudySheetOpen,
+            slots = vm.state.overlays.selfStudies,
+            onSave = vm::saveSelfStudies,
+            onDismiss = vm::closeSelfStudySheet,
         )
         NoticeDetailOverlay(
             detail = vm.state.noticeDetail,
@@ -294,7 +358,7 @@ private fun AppRoot(vm: AppViewModel = viewModel()) {
 
         ShiftSheet(
             visible = vm.state.shiftSheetOpen,
-            shifts = vm.state.shifts,
+            shifts = vm.state.overlays.shifts,
             onAdd = vm::addShift,
             onRemove = vm::removeShift,
             onDismiss = vm::closeShiftSheet,
@@ -304,7 +368,8 @@ private fun AppRoot(vm: AppViewModel = viewModel()) {
             visible = vm.state.moreMenuOpen,
             versionLabel = BuildConfig.VERSION_NAME,
             noticeCount = vm.state.notices.size,
-            shiftCount = vm.state.shifts.size,
+            shiftCount = vm.state.overlays.shifts.size,
+            selfStudyCount = vm.state.overlays.selfStudies.size,
             onNotices = {
                 vm.closeMoreMenu()
                 vm.selectTab(Tab.Notices)
@@ -312,6 +377,10 @@ private fun AppRoot(vm: AppViewModel = viewModel()) {
             onShifts = {
                 vm.closeMoreMenu()
                 vm.openShiftSheet()
+            },
+            onSelfStudy = {
+                vm.closeMoreMenu()
+                vm.openSelfStudySheet()
             },
             onDismiss = vm::closeMoreMenu,
         )
@@ -330,6 +399,7 @@ private fun AppRoot(vm: AppViewModel = viewModel()) {
         ExportSheet(
             visible = exportSheet,
             hasPeriodTimes = periodTimes.configured,
+            hasSelfStudy = vm.state.overlays.selfStudies.any { it.weekdays.isNotEmpty() },
             onDismiss = { exportSheet = false },
             onImage = { doExport("png") },
             onExcel = { doExport("xlsx") },

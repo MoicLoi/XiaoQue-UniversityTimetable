@@ -22,7 +22,7 @@ import com.xiqueer.android.notify.ClassOccurrence
 import com.xiqueer.android.notify.Notifications
 import com.xiqueer.android.notify.ScheduleOverrides
 import com.xiqueer.android.repository.TimetableCache
-import com.xiqueer.android.data.ShiftStore
+import com.xiqueer.android.data.Overlays
 import java.time.ZoneId
 import java.util.concurrent.TimeUnit
 
@@ -227,16 +227,18 @@ class ClassOverlayService : Service() {
                 .onFailure { Log.w(TAG, "stop overlay service failed", it) }
         }
 
-        /** 当前正在上的那节课(与提醒共用同一套调休修正逻辑)。 */
+        /** 当前正在上的那节课(与提醒共用同一套覆盖层修正逻辑)。 */
         fun currentOngoingCourse(context: Context, now: Long = System.currentTimeMillis()): ClassOccurrence? {
             val times = PeriodTimesStore(context).load()
-            if (!times.configured) return null
+            val overlays = Overlays.load(context)
+            // 晚自习不依赖作息表,所以不能因为"没配作息"就把整个判断跳过
+            val hasSelfStudy = overlays.selfStudies.any { it.weekdays.isNotEmpty() }
+            if (!times.configured && !hasSelfStudy) return null
             val timetable = TimetableCache.read(context) ?: return null
-            val shifts = ShiftStore(context).all()
             val today = java.time.Instant.ofEpochMilli(now).atZone(ZoneId.systemDefault()).toLocalDate()
             return (0..1)
                 .flatMap { d ->
-                    ScheduleOverrides.forDate(timetable, times, shifts, today.plusDays(d.toLong()))
+                    ScheduleOverrides.forDate(timetable, times, overlays, today.plusDays(d.toLong()))
                         .filter { !it.isMovedOut }
                         .map { it.occurrence }
                 }

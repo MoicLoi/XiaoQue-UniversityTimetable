@@ -54,46 +54,55 @@ object ExportShare {
             .joinToString("")
             .ifEmpty { "export" }
 
-    fun csvArtifact(t: com.xiqueer.protocol.Timetable, week: Int) = Artifact(
-        bytes = TimetableExport.csv(t),
+    fun csvArtifact(
+        t: com.xiqueer.protocol.Timetable,
+        overlays: com.xiqueer.android.data.Overlays,
+        week: Int,
+    ) = Artifact(
+        bytes = TimetableExport.csv(t, overlays),
         fileName = "课表_第${week}周.csv",
         mime = "text/csv",
     )
 
-    fun xlsxArtifact(t: com.xiqueer.protocol.Timetable, times: com.xiqueer.android.data.PeriodTimes) =
-        Artifact(
-            bytes = TimetableExport.xlsx(t, times),
-            fileName = "课表.xlsx",
-            mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
+    fun xlsxArtifact(
+        t: com.xiqueer.protocol.Timetable,
+        times: com.xiqueer.android.data.PeriodTimes,
+        overlays: com.xiqueer.android.data.Overlays,
+    ) = Artifact(
+        bytes = TimetableExport.xlsx(t, times, overlays),
+        fileName = "课表.xlsx",
+        mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
 
     /**
      * 一张可以直接发群里的课表图。
      *
-     * 也接 [shifts] —— 导出图和屏幕上看到的必须是同一份数据,
-     * 否则会出现"截图里有调休、导出图里没有"这种最尴尬的不一致。
+     * 也接 [overlays] —— 导出图和屏幕上看到的必须是同一份数据,
+     * 否则会出现"截图里有调休/改了教室、导出图里没有"这种最尴尬的不一致。
      */
     fun pngArtifact(
         t: com.xiqueer.protocol.Timetable,
         times: com.xiqueer.android.data.PeriodTimes,
-        shifts: List<com.xiqueer.android.data.Shift>,
+        overlays: com.xiqueer.android.data.Overlays,
         week: Int,
     ) = Artifact(
-        bytes = TimetableImage.png(t, times, shifts),
+        bytes = TimetableImage.png(t, times, overlays),
         fileName = "课表_第${week}周.png",
         mime = "image/png",
     )
 
     /**
      * 日历事件。**没有作息表就返回 null** —— 见 [TimetableExport.ics]。
+     * 例外:只要配了晚自习,即使没填作息也能导出(晚自习自带绝对时间)。
      * 这里不接收"第几周周一"之类的参数:时间基准只能由课表模型自己给,
      * 从外面传一个近似值进来正是之前那个"整体晚 3 周" bug 的来源。
      */
     fun icsArtifact(
         t: com.xiqueer.protocol.Timetable,
         times: com.xiqueer.android.data.PeriodTimes,
+        overlays: com.xiqueer.android.data.Overlays,
     ): Artifact? {
-        val text = TimetableExport.ics(t, times) ?: return null
+        val text = TimetableExport.ics(t, times, overlays) ?: return null
         return Artifact(
             bytes = text.toByteArray(Charsets.UTF_8),
             fileName = "课表.ics",

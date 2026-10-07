@@ -42,11 +42,23 @@ import com.xiqueer.protocol.Course
 fun BoxScope.CourseDetailOverlay(
     course: Course?,
     times: PeriodTimes,
+    /**
+     * 这一节已存的课节覆写。
+     *
+     * ⚠️ 详情要显示**生效值**而不是底表值:网格上已经画着新教室 / 新节次了,
+     * 点开却写着老值,用户会以为改动没生效。
+     * 底表值仍然保留在下面那行"原:…"里,好让人知道改之前是什么。
+     */
+    override: com.xiqueer.android.data.CourseOverride? = null,
     onDismiss: () -> Unit,
 ) {
     if (course == null) return
 
     val interaction = remember { MutableInteractionSource() }
+
+    val effRoom = override?.room ?: course.room
+    val effPeriods = override?.periods ?: course.periods
+    val changed = effRoom != course.room || effPeriods != course.periods
 
     // 遮罩:点击关闭
     Box(
@@ -76,8 +88,14 @@ fun BoxScope.CourseDetailOverlay(
             Spacer(Modifier.height(14.dp))
 
             DetailRow("教师", course.teacher)
-            DetailRow("地点", course.room.ifEmpty { course.roomRaw })
-            DetailRow("节次", periodLabel(course.periods, times))
+            DetailRow("地点", effRoom.ifEmpty { course.roomRaw })
+            DetailRow("节次", periodLabel(effPeriods, times))
+            if (changed) {
+                val orig = ArrayList<String>(2)
+                if (effPeriods != course.periods) orig.add(periodLabel(course.periods, times))
+                if (effRoom != course.room && course.room.isNotBlank()) orig.add(course.room)
+                if (orig.isNotEmpty()) DetailRow("已改动", "原 " + orig.joinToString(" · "))
+            }
             DetailRow("周次", course.weeks)
             DetailRow("学分", course.credit)
             if (course.note.isNotEmpty()) DetailRow("备注", course.note)
