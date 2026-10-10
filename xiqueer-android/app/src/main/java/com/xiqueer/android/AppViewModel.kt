@@ -89,6 +89,8 @@ data class UiState(
     val courseEditOpen: Boolean = false,
     /** 晚自习设置面板是否展开。 */
     val selfStudySheetOpen: Boolean = false,
+    /** 临时课程(紧急调换 / 开会)面板是否展开。 */
+    val customCourseSheetOpen: Boolean = false,
     /** 上课悬浮窗开关(默认关,且要系统授权)。 */
     val overlayEnabled: Boolean = false,
     /** 系统是否已经给了「显示在其他应用上层」权限。 */
@@ -195,14 +197,16 @@ class AppViewModel(
     private val shiftStore = com.xiqueer.android.data.ShiftStore(app)
     private val courseOverrideStore = com.xiqueer.android.data.CourseOverrideStore(app)
     private val selfStudyStore = com.xiqueer.android.data.SelfStudyStore(app)
+    private val customCourseStore = com.xiqueer.android.data.CustomCourseStore(app)
     private val overlayStore = com.xiqueer.android.data.OverlaySettingsStore(app)
 
-    /** 从三个 Store 读齐覆盖层。**只在这里拼**,别处不许各自拼一份。 */
+    /** 从四个 Store 读齐覆盖层。**只在这里拼**,别处不许各自拼一份。 */
     private fun readOverlays(): com.xiqueer.android.data.Overlays =
         com.xiqueer.android.data.Overlays(
             shifts = shiftStore.all(),
             courseOverrides = courseOverrideStore.all(),
             selfStudies = selfStudyStore.all(),
+            customCourses = customCourseStore.all(),
         )
 
     /** 工具的**唯一**实例 —— 执行门就挂在这里,别在别处再造一个。 */
@@ -211,6 +215,7 @@ class AppViewModel(
         periods = periodStore,
         watch = watchStore,
         shifts = shiftStore,
+        customCourses = customCourseStore,
         // 读课表的工具必须看到和界面同一份覆盖层,否则 AI 会说"课在 H502"
         // 而屏幕上写的是 H303
         overlays = { readOverlays() },
@@ -308,6 +313,8 @@ class AppViewModel(
                     // 学期代码单独存的;缓存里那棵树本身不带学期
                     term = repo.currentCachedTerm() ?: state.term,
                 )
+                // 顺手给缺快照的调休补上 —— 首帧就能补,不必等一个网络来回
+                backfillShiftSnapshots(cached)
             }
             loadTimetable()
             // 重排闹钟要读缓存文件 —— 放后台,别占首帧
@@ -433,11 +440,51 @@ class AppViewModel(
      * 加完必须立刻重排提醒 —— 否则会出现"课挪走了,闹钟还在原来的日子响"。
      */
     fun addShift(from: String, to: String, courses: List<String>?): String {
-        val shift = shiftStore.add(from, to, courses)
+        // ⚠️ 源那天要搬的课**必须当场记下来**:课表一次只加载一周,
+        // 等目标周渲染时再回头去取源那天的课是取不到的 —— 跨周就是一片空白。
+        val snapshot = shiftSnapshotOf(from, courses)
+        val shift = shiftStore.add(from, to, courses, snapshot)
             ?: return "没添加:日期格式不对、起止是同一天,或者这条调休已经存在"
         state = state.copy(overlays = readOverlays())
         rescheduleReminders()
         return "已记录调休:${shift.describe()}"
+    }
+
+    /**
+     * 取 [date] 那天要搬的课的快照;那天不在当前加载的这一周时返回空表。
+     *
+     * 返回空**不是错误**:同周调休根本用不到快照,用户翻到源周时
+     * [backfillShiftSnapshots] 会补上。
+     */
+    private fun shiftSnapshotOf(
+        date: String,
+        courses: List<String>?,
+    ): List<com.xiqueer.android.data.ShiftCourse> {
+        val t = state.timetable ?: return emptyList()
+        val d = runCatching { java.time.LocalDate.parse(date.trim()) }.getOrNull() ?: return emptyList()
+        return com.xiqueer.android.notify.ScheduleOverrides.snapshotOf(t, d, state.periodTimes, courses)
+    }
+
+    /**
+     * 给"还缺快照"的调休补上。
+     *
+     * 创建那条调休时如果源日期不在当时加载的那一周,快照就是空的 ——
+     * 它的跨周搬运会是空的(这正是"原位置灰显、目标位置没有课"的成因)。
+     * 用户一旦翻到源那一周,这里把它补上,之后目标周就能正常显示了。
+     *
+     * 已有快照的**绝不动**(见 [com.xiqueer.android.data.ShiftStore.setSnapshot]):
+     * 后来的底表刷新不该悄悄改写"当时要搬什么"。
+     */
+    private fun backfillShiftSnapshots(t: Timetable) {
+        val times = state.periodTimes
+        var changed = false
+        for (s in shiftStore.all()) {
+            if (s.snapshot.isNotEmpty()) continue
+            val from = s.fromDate ?: continue
+            val snap = com.xiqueer.android.notify.ScheduleOverrides.snapshotOf(t, from, times, s.courses)
+            if (snap.isNotEmpty() && shiftStore.setSnapshot(s.id, snap)) changed = true
+        }
+        if (changed) state = state.copy(overlays = readOverlays())
     }
 
     fun removeShift(id: String) {
@@ -497,6 +544,49 @@ class AppViewModel(
 
     fun closeSelfStudySheet() {
         state = state.copy(selfStudySheetOpen = false)
+    }
+
+    // ---- 临时课程(紧急调换 / 开会)----
+
+    /**
+     * 覆盖式保存临时课程。传空列表 = 全部删掉。
+     *
+     * 与晚自习同一个口径:保存后立刻重排提醒 —— 临时课程也参与课前提醒,
+     * 不重排的话"加了课却不提醒"。
+     */
+    fun saveCustomCourses(courses: List<com.xiqueer.android.data.CustomCourse>): String {
+        val saved = customCourseStore.save(courses)
+        state = state.copy(overlays = readOverlays())
+        rescheduleReminders()
+        return if (saved.isEmpty()) "已清空临时课程" else "已保存临时课程:${saved.size} 条"
+    }
+
+    fun removeCustomCourse(id: String): String {
+        val removed = customCourseStore.removeById(id)
+        state = state.copy(overlays = readOverlays())
+        rescheduleReminders()
+        return if (removed) "已删除这条临时课程" else "没找到这条临时课程"
+    }
+
+    /**
+     * 名称索引:**填名称时可以从学校现有的服务器侧课程里挑一门**。
+     *
+     * 返回底表里的那门课本身,而不是只返回名字 —— 选中它还要把教师/教室作为默认值
+     * 填进表单。配色与「要带什么」本来就是按课名索引的
+     * (`CourseColors` / `CourseItemsStore`),所以同名即自动继承,不需要额外机制。
+     */
+    fun serverCourse(name: String): com.xiqueer.protocol.Course? {
+        val n = name.trim()
+        if (n.isEmpty()) return null
+        return (state.timetable?.days?.flatten() ?: emptyList()).firstOrNull { it.name == n }
+    }
+
+    fun openCustomCourseSheet() {
+        state = state.copy(customCourseSheetOpen = true)
+    }
+
+    fun closeCustomCourseSheet() {
+        state = state.copy(customCourseSheetOpen = false)
     }
 
     // ---- 课节改动编辑面板 ----
@@ -735,6 +825,7 @@ class AppViewModel(
                     currentWeek = if (week == null) t.currentWeek else state.currentWeek,
                     error = null,
                 )
+                backfillShiftSnapshots(t)
                 // 翻了页就不重排提醒:提醒只跟真实本周有关,重排纯属浪费
                 if (week == null) {
                     // 明天跨周的话,顺手把下周也准备好(日程页要用)

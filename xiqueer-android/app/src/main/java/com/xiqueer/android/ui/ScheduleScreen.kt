@@ -70,6 +70,8 @@ fun ScheduleScreen(
     nextWeekTimetable: Timetable? = null,
     modifier: Modifier = Modifier,
     onCourseClick: (com.xiqueer.protocol.Course) -> Unit = {},
+    /** 「临时加一节课」—— 开会/紧急调换都是临时通知来的,不该逼用户翻三层菜单。 */
+    onAddCustomCourse: () -> Unit = {},
 ) {
     if (timetable == null) {
         EmptyState("还没有课表,点右上角刷新", modifier)
@@ -168,6 +170,23 @@ fun ScheduleScreen(
             } else {
                 list.forEach { e -> ScheduleRow(e, nearest, showingTomorrow, now, items, times, timetable, onCourseClick) }
             }
+
+            // 只在"今天"这一屏给入口 —— 临时加课是"现在就要用"的事,
+            // 明天那一屏加它没有意义(每周固定的那类走「更多 → 临时课程」)
+            if (!showingTomorrow) {
+                Spacer(Modifier.height(4.dp))
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(50))
+                        .background(GlassTokens.Fill)
+                        .clickable(onClick = onAddCustomCourse)
+                        .padding(vertical = 10.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text("＋ 临时加一节课 / 一个会", color = XqColors.TextSecondary, fontSize = 12.sp)
+                }
+            }
             Spacer(Modifier.height(16.dp))
         }
     }
@@ -195,7 +214,9 @@ private fun ScheduleRow(
         hasPeriodTimes = times.configured,
         movedOut = e.movedTo,
         movedIn = e.movedFrom,
-        onClick = { courseOf(timetable, o)?.let(onCourseClick) },
+        // 快照还原的跨周调来课、以及自定义层(晚自习 / 临时课程)在底表里都没有身份,
+        // courseOf 会误配同名课 —— 直接不给点击
+        onClick = { if (e.snapshotOnly || o.isCustom) Unit else courseOf(timetable, o)?.let(onCourseClick) },
     )
     Spacer(Modifier.height(8.dp))
 }
@@ -289,11 +310,9 @@ private fun CourseCard(
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        // 括号不能省:`"a" + if (c) "b" else "" + " 节"` 里 else 分支会先算 `"" + " 节"`,
-                        // 于是多节连堂那条分支把"节"丢了(显示成「第 3-4」)
-                        "第 ${o.periodStart}" +
-                            (if (o.periodEnd != o.periodStart) "-${o.periodEnd}" else "") +
-                            " 节",
+                        // 自定义层不能显示节次号 —— 它占的是人工行号或别人写的时刻。
+                        // periodLabel() 把这条口径收在一处(见 ClassOccurrence)
+                        o.periodLabel(),
                         color = when {
                             disabled -> XqColors.TextTertiary
                             isNearest -> XqColors.AccentSoft

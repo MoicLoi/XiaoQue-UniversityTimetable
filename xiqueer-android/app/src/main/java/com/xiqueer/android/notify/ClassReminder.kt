@@ -41,13 +41,27 @@ data class ClassOccurrence(
      */
     val courseKey: String = "",
     /**
-     * 非 null = 这**不是**服务端课表里的第 N 节,而是一个自定义时段(晚自习)。
-     * 有值时界面不显示"第 N 节",改显示它本身;网格里它占的行也由外部指定。
+     * 非 null = 这**不是**服务端课表里的第 N 节,而是本地定义的一条
+     * (晚自习 / 临时课程)。有值时界面不显示"第 N 节",改显示它本身;
+     * 网格里它占的行也由外部指定(`ScheduleOverrides`)。
      */
     val customLabel: String? = null,
 ) {
-    /** 是不是自定义时段(晚自习),而不是服务端的第 N 节。 */
+    /** 是不是自定义层(晚自习 / 临时课程),而不是服务端的第 N 节。 */
     val isCustom: Boolean get() = !customLabel.isNullOrBlank()
+
+    /**
+     * 卡片/通知上"第几节"那一行。
+     *
+     * 自定义层**不能**显示节次号:晚自习占的是人工行号(第 13 行),临时课程若是
+     * 按时间填的、又被挂到人工行上,那个数字同样不是节次。有绝对时间就显示时间,
+     * 再没有就退回名字。
+     */
+    fun periodLabel(): String = when {
+        !isCustom -> if (periodEnd != periodStart) "第 $periodStart-$periodEnd 节" else "第 $periodStart 节"
+        startLabel != null -> listOfNotNull(startLabel, endLabel).joinToString("-")
+        else -> customLabel.orEmpty()
+    }
 
     /** 通知/列表里的一行:`第 1-2 节 · 08:00 · 厚德楼-H502` */
     fun scheduleLine(): String = buildString {

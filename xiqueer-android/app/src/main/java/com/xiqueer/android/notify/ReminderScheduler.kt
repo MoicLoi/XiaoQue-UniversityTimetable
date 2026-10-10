@@ -98,10 +98,9 @@ object ReminderScheduler {
 
         val times = PeriodTimesStore(context).load()
         val overlaysForGate = Overlays.load(context)
-        // 晚自习自带绝对时间,不依赖作息表 —— 所以"没配作息就什么都不发"
-        // 只对服务端课表成立,不能把用户自己填的时段也一起挡掉
-        val hasSelfStudy = overlaysForGate.selfStudies.any { it.weekdays.isNotEmpty() }
-        if (!times.configured && !hasSelfStudy) {
+        // 晚自习 / 按时间填的临时课程自带绝对时间,不依赖作息表 —— 所以"没配作息就什么都不发"
+        // 只对服务端课表成立,不能把用户自己填的条目也一起挡掉
+        if (!times.configured && !overlaysForGate.hasOwnClock) {
             // 不知道几点上下课,就既不知道该何时发也不知道何时撤 —— 干脆不发
             Notifications.cancelOngoing(context)
             Log.d(TAG, "period times not configured → no ongoing notification")
@@ -196,7 +195,9 @@ object ReminderScheduler {
             TAG,
             "source=${times.source.label} week=${timetable.currentWeek} shifts=${overlays.shifts.size} " +
                 "upcoming24h=${upcoming.size}" +
-                upcoming.take(3).joinToString("") { " | ${it.courseName} ${it.date} 第${it.periodStart}节 fire=${Date(it.fireAtMillis!!)}" },
+                // 用 periodLabel():自定义层(晚自习 / 临时课程)占的不是节次号,
+                // 硬写"第 N 节"会把人工行号当成节次打进日志,排查时被带偏
+                upcoming.take(3).joinToString("") { " | ${it.courseName} ${it.date} ${it.periodLabel()} fire=${Date(it.fireAtMillis!!)}" },
         )
         if (next?.fireAtMillis == null) {
             Log.d(TAG, "nothing within ${HORIZON_MS / 3_600_000}h")

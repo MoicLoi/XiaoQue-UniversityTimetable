@@ -57,6 +57,7 @@ import com.xiqueer.android.ui.NoticesScreen
 import com.xiqueer.android.ui.PeriodTimesNotice
 import com.xiqueer.android.ui.ScheduleScreen
 import com.xiqueer.android.ui.SchoolPickerSheet
+import com.xiqueer.android.ui.CustomCourseSheet
 import com.xiqueer.android.ui.SelfStudySheet
 import com.xiqueer.android.ui.SettingsSheet
 import com.xiqueer.android.ui.ShiftSheet
@@ -223,6 +224,7 @@ private fun AppRoot(vm: AppViewModel = viewModel()) {
                             overlays = vm.state.overlays,
                             nextWeekTimetable = vm.state.nextWeekTimetable,
                             onCourseClick = vm::openCourse,
+                            onAddCustomCourse = vm::openCustomCourseSheet,
                         )
                         Tab.Timetable -> TimetableScreen(
                             timetable = timetable,
@@ -320,6 +322,16 @@ private fun AppRoot(vm: AppViewModel = viewModel()) {
             onSave = vm::saveSelfStudies,
             onDismiss = vm::closeSelfStudySheet,
         )
+        CustomCourseSheet(
+            visible = vm.state.customCourseSheetOpen,
+            courses = vm.state.overlays.customCourses,
+            // 名称索引的候选来自**服务器课表**,不是本地覆盖层 —— 需求口径如此
+            serverCourseNames = vm.courseNames(),
+            lookup = vm::serverCourse,
+            onSave = vm::saveCustomCourses,
+            onRemove = vm::removeCustomCourse,
+            onDismiss = vm::closeCustomCourseSheet,
+        )
         NoticeDetailOverlay(
             detail = vm.state.noticeDetail,
             loading = vm.state.noticeDetailOpen && vm.state.noticeDetail == null,
@@ -370,6 +382,7 @@ private fun AppRoot(vm: AppViewModel = viewModel()) {
             noticeCount = vm.state.notices.size,
             shiftCount = vm.state.overlays.shifts.size,
             selfStudyCount = vm.state.overlays.selfStudies.size,
+            customCourseCount = vm.state.overlays.customCourses.size,
             onNotices = {
                 vm.closeMoreMenu()
                 vm.selectTab(Tab.Notices)
@@ -381,6 +394,10 @@ private fun AppRoot(vm: AppViewModel = viewModel()) {
             onSelfStudy = {
                 vm.closeMoreMenu()
                 vm.openSelfStudySheet()
+            },
+            onCustomCourses = {
+                vm.closeMoreMenu()
+                vm.openCustomCourseSheet()
             },
             onDismiss = vm::closeMoreMenu,
         )
@@ -399,7 +416,7 @@ private fun AppRoot(vm: AppViewModel = viewModel()) {
         ExportSheet(
             visible = exportSheet,
             hasPeriodTimes = periodTimes.configured,
-            hasSelfStudy = vm.state.overlays.selfStudies.any { it.weekdays.isNotEmpty() },
+            hasOwnClock = vm.state.overlays.hasOwnClock,
             onDismiss = { exportSheet = false },
             onImage = { doExport("png") },
             onExcel = { doExport("xlsx") },

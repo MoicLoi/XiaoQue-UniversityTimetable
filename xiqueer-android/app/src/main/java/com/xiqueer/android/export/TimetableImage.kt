@@ -56,9 +56,9 @@ object TimetableImage {
     private const val TODAY_BG = 0x146FA8FF
 
     fun png(t: Timetable, times: PeriodTimes, overlays: Overlays): ByteArray {
-        // 行数 = 服务端节次 + 晚自习等自定义时段。上限只用来防服务端给出荒唐的节次数,
-        // 不能小到把用户自己加的时段裁掉 —— 那会表现为"导出的图上晚自习凭空消失"。
-        val rows = ScheduleOverrides.gridRows(t, overlays).coerceAtMost(18)
+        // 行数 = 服务端节次 + 人工行(晚自习 / 挂人工行的临时课程)。上限只用来防服务端
+        // 给出荒唐的节次数,不能小到把用户自己加的条目裁掉 —— 那会表现为"导出的图上凭空消失"。
+        val rows = ScheduleOverrides.gridRows(t, times, overlays).coerceAtMost(18)
         val w = (PAD * 2 + GUTTER + CELL_W * 7).toInt()
         val h = (PAD * 2 + TITLE_H + HEADER_H + CELL_H * rows + FOOTER_H).toInt()
 
@@ -155,8 +155,11 @@ object TimetableImage {
         gridTop: Float,
     ) {
         val num = textPaint(TEXT_MID, 26f)
+        val manualName = textPaint(TEXT_MID, 20f)
         val time = textPaint(TEXT_LO, 18f)
         val serverPeriods = maxOf(1, t.maxPeriod)
+        // 人工行的顺序只有覆盖层那一份 —— 网格页、xlsx、这张图都读它
+        val manual = ScheduleOverrides.manualRows(t, times, overlays)
         for (p in 1..rows) {
             val cy = gridTop + CELL_H * (p - 1)
             if (p <= serverPeriods) {
@@ -167,11 +170,13 @@ object TimetableImage {
                     c.drawText(s, PAD + 58f, cy + 46f, time)
                 }
             } else {
-                // 自定义时段(晚自习):没有节次号,画它的名字与开始时间
-                val slot = overlays.selfStudies.getOrNull(p - serverPeriods - 1) ?: continue
+                // 人工行(晚自习 / 临时课程):没有节次号,画它的名字与开始时间。
+                // 名字用更小的字号 —— 与节次号同为 26f 时,"晚自"会盖住后面的 19:00
+                // (真机上导出的图就是这么糊成一团的)。
+                val slot = manual.getOrNull(p - serverPeriods - 1) ?: continue
                 val label = slot.label.take(2)
-                c.drawText(label, PAD + 12f, cy + 46f, num)
-                c.drawText(slot.start, PAD + 58f, cy + 46f, time)
+                c.drawText(label, PAD + 12f, cy + 46f, manualName)
+                c.drawText(slot.start, PAD + 60f, cy + 46f, time)
             }
         }
     }

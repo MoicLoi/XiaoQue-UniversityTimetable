@@ -142,7 +142,10 @@ private fun weekCells(
         col.map { e ->
             val o = e.occurrence
             GridCell(
-                course = courseOf(t, o),
+                // 快照还原出来的那一节、以及自定义层(晚自习 / 临时课程)在底表里都
+                // 不存在,不给它们绑课程 —— 否则 courseOf 会退化成按课名匹配,
+                // 误配到同名但另一天的那一节上
+                course = if (e.snapshotOnly || o.isCustom) null else courseOf(t, o),
                 name = o.courseName,
                 start = o.periodStart,
                 end = o.periodEnd,
@@ -177,8 +180,8 @@ fun TimetableScreen(
 
     val today = remember(timetable.weekStart) { todayColumnIndex(timetable) }
     val maxPeriod = maxOf(1, timetable.maxPeriod)
-    // 行数含晚自习等自定义时段 —— 网格与导出图必须用同一个数算高度
-    val rows = ScheduleOverrides.gridRows(timetable, overlays)
+    // 行数含晚自习 / 临时课程等自定义层 —— 网格与导出图必须用同一个数算高度
+    val rows = ScheduleOverrides.gridRows(timetable, times, overlays)
 
     Column(modifier.fillMaxSize().padding(top = 6.dp)) {
         WeekHeaderCard(
@@ -356,9 +359,11 @@ private fun GridBody(
 ) {
     // 整周只算一次:7 列共用同一份 effective 数据(覆盖层只在这里生效一次)
     val week = remember(t, times, overlays) { weekCells(t, times, overlays) }
+    // 节次区之外的人工行(晚自习 / 挂人工行的临时课程),由覆盖层统一给出顺序
+    val manual = remember(t, times, overlays) { ScheduleOverrides.manualRows(t, times, overlays) }
     Row(Modifier.fillMaxWidth().height(ROW_HEIGHT * rows)) {
         // 左侧节次栏:节次号;配置了作息表才显示开始时间。
-        // 最后几行是自定义时段(晚自习)—— 它们没有节次号,改显示名字与开始时间。
+        // 最后几行是人工行 —— 它们没有节次号,改显示名字与开始时间。
         Column(Modifier.width(GUTTER_WIDTH)) {
             for (p in 1..rows) {
                 Column(
@@ -372,7 +377,7 @@ private fun GridBody(
                             Text(it, color = XqColors.TextTertiary, fontSize = 8.sp)
                         }
                     } else {
-                        val slot = overlays.selfStudies.getOrNull(p - maxPeriod - 1)
+                        val slot = manual.getOrNull(p - maxPeriod - 1)
                         if (slot != null) {
                             Text(
                                 slot.label.take(2),

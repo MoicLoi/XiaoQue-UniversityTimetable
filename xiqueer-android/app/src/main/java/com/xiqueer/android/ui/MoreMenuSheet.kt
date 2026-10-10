@@ -34,9 +34,12 @@ fun BoxScope.MoreMenuSheet(
     shiftCount: Int,
     /** 已配置的自定义时段(晚自习)条数,0 = 未开启。 */
     selfStudyCount: Int = 0,
+    /** 已配置的临时课程条数。 */
+    customCourseCount: Int = 0,
     onNotices: () -> Unit,
     onShifts: () -> Unit,
     onSelfStudy: () -> Unit = {},
+    onCustomCourses: () -> Unit = {},
     onDismiss: () -> Unit,
 ) {
     GlassSheet(visible = visible, onDismiss = onDismiss) {
@@ -59,6 +62,16 @@ fun BoxScope.MoreMenuSheet(
             title = "晚自习",
             desc = if (selfStudyCount > 0) "已开启 $selfStudyCount 条自定义时段" else "在时间轴上加一节自定义时段(会进日程与提醒)",
             onClick = onSelfStudy,
+        )
+        Spacer(Modifier.height(8.dp))
+        MenuRow(
+            title = "临时课程",
+            desc = if (customCourseCount > 0) {
+                "已记录 $customCourseCount 条(紧急调换 / 开会)"
+            } else {
+                "临时开会、紧急调换 —— 任意节次插一节课,也能配每周固定的"
+            },
+            onClick = onCustomCourses,
         )
 
         Spacer(Modifier.height(10.dp))

@@ -25,6 +25,8 @@ class ToolRegistry(
     private val periods: PeriodTimesStore,
     private val watch: WatchSettingsStore,
     private val shifts: com.xiqueer.android.data.ShiftStore,
+    /** 临时课程(紧急调换 / 开会)的本地层。让 AI 也能"把周三下午的会加进课表"。 */
+    private val customCourses: com.xiqueer.android.data.CustomCourseStore,
     /**
      * 当前覆盖层的读取入口(调休 + 课节覆写 + 晚自习)。
      *
@@ -83,6 +85,31 @@ class ToolRegistry(
             Risk.Local,
         ),
         XqTool("get_period_times", "查看作息表配置状态与提醒/监听开关", risk = Risk.Read),
+        XqTool("list_custom_courses", "查看已记录的临时课程(紧急调换 / 开会)", risk = Risk.Read),
+        XqTool(
+            "add_custom_course",
+            "在课表里加一条**临时课程**(紧急调换、临时开会)。**只改本机数据,不上传学校**。" +
+                "时段二选一:按首尾节填 periods(如 3-4),或按时刻填 start/end(如 14:00 与 15:30)。" +
+                "生效范围二选一:只这一次填 date(yyyy-MM-dd),每周固定填 weekdays(0=周一…6=周日,逗号分隔)。" +
+                "它不参与调休。",
+            listOf(
+                ToolParam("name", "课程/事项名称(必填)"),
+                ToolParam("periods", "首尾节,如 3-4;与 start/end 二选一", required = false),
+                ToolParam("start", "开始时刻 HH:mm;与 periods 二选一", required = false),
+                ToolParam("end", "结束时刻 HH:mm", required = false),
+                ToolParam("date", "只这一次的日期 yyyy-MM-dd;与 weekdays 二选一", required = false),
+                ToolParam("weekdays", "每周重复的星期,逗号分隔如 0,2,4;与 date 二选一", required = false),
+                ToolParam("room", "地点", required = false),
+                ToolParam("teacher", "教师/主讲人", required = false),
+            ),
+            Risk.Local,
+        ),
+        XqTool(
+            "cancel_custom_course",
+            "删除一条临时课程(用 list_custom_courses 拿到的 id)",
+            listOf(ToolParam("id", "临时课程的 id")),
+            Risk.Local,
+        ),
         XqTool(
             "search_open_courses",
             "查询当前开放的选课课程。注意:本校选课接口由教务内网提供,公网多半不可达;" +
@@ -339,7 +366,15 @@ class ToolRegistry(
             val from = args["from_date"].orEmpty().trim()
             val to = args["to_date"].orEmpty().trim()
             val course = args["course_name"]?.trim()?.takeIf { it.isNotEmpty() }
-            val added = shifts.add(from, to, course?.let { listOf(it) })
+            // 与 UI 入口同一套:把源那天要搬的课**当场快照**下来。
+            // 少了它,跨周的调休在目标周就是一片空白(课表一次只加载一周)。
+            val snapshot = runCatching {
+                val t = repo.currentCachedTimetable() ?: return@runCatching emptyList()
+                val d = java.time.LocalDate.parse(from)
+                com.xiqueer.android.notify.ScheduleOverrides
+                    .snapshotOf(t, d, periods.load(), course?.let { listOf(it) })
+            }.getOrDefault(emptyList())
+            val added = shifts.add(from, to, course?.let { listOf(it) }, snapshot)
             if (added == null) {
                 "没添加:日期要形如 2026-09-28、起止不能是同一天,或者这条调休已经存在。" +
                     "请确认后再说一次。"
@@ -357,6 +392,47 @@ class ToolRegistry(
                 "已撤销该调休,提醒已重排。"
             } else {
                 "没找到 id 为 $id 的调休。可以用 list_shifts 看一下现有的。"
+            }
+        }
+
+        "list_custom_courses" -> {
+            val all = customCourses.all()
+            if (all.isEmpty()) "目前没有任何临时课程。"
+            else all.joinToString("\n") { "· [${it.id}] ${it.describe()}" }
+        }
+
+        "add_custom_course" -> {
+            // 与 UI 入口走**同一个** of():面板、AI、反序列化三处都过同一道闸
+            val made = com.xiqueer.android.data.CustomCourse.of(
+                name = args["name"].orEmpty(),
+                room = args["room"].orEmpty(),
+                teacher = args["teacher"].orEmpty(),
+                periods = args["periods"],
+                start = args["start"],
+                end = args["end"],
+                weekdays = args["weekdays"].orEmpty()
+                    .split(',', '，', ' ')
+                    .mapNotNull { it.trim().toIntOrNull() },
+                date = args["date"],
+            )
+            if (made == null) {
+                "没添加:名称必填;时段要么给 periods(如 3-4)、要么给一对 start/end(HH:mm 且结束晚于开始);" +
+                    "生效范围要么给 date、要么给 weekdays。请确认后再说一次。"
+            } else {
+                customCourses.save(customCourses.all() + made)
+                // 提醒必须跟着走 —— 与调休同一个道理,少了它"加了课却不提醒"
+                onScheduleChanged()
+                "已记录临时课程:${made.describe()}。课前提醒已重排。"
+            }
+        }
+
+        "cancel_custom_course" -> {
+            val id = args["id"].orEmpty().trim()
+            if (customCourses.removeById(id)) {
+                onScheduleChanged()
+                "已删除该临时课程,提醒已重排。"
+            } else {
+                "没找到 id 为 $id 的临时课程。可以用 list_custom_courses 看一下现有的。"
             }
         }
 

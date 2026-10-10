@@ -92,11 +92,8 @@ object Notifications {
      */
     fun classOngoingNotification(context: Context, o: ClassOccurrence): android.app.Notification {
         val end = o.classEndMillis
-        val period = if (o.periodEnd != o.periodStart) {
-            "第 ${o.periodStart}-${o.periodEnd} 节"
-        } else {
-            "第 ${o.periodStart} 节"
-        }
+        // 自定义层(晚自习 / 临时课程)占的不是节次号,periodLabel() 会改显示它的时段
+        val period = o.periodLabel()
         val where = listOf(o.room, o.teacher).filter { it.isNotBlank() }.joinToString(" · ")
         val b = NotificationCompat.Builder(context, CH_ONGOING)
             .setSmallIcon(android.R.drawable.ic_menu_recent_history)
