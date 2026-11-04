@@ -452,7 +452,8 @@ class ClassOverlayService : Service() {
             return (0..1)
                 .flatMap { d ->
                     ScheduleOverrides.forDate(timetable, times, overlays, today.plusDays(d.toLong()))
-                        .filter { !it.isMovedOut }
+                        // 被调走的、已失效的都不算"正在上"
+                        .filter { it.attendable }
                         .map { it.occurrence }
                 }
                 .firstOrNull {

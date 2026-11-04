@@ -7,6 +7,7 @@ import com.xiqueer.android.data.PeriodTimes
 import com.xiqueer.android.data.SelfStudySlot
 import com.xiqueer.android.data.Shift
 import com.xiqueer.android.data.ShiftCourse
+import com.xiqueer.android.data.VoidMode
 import com.xiqueer.protocol.Timetable
 import java.time.LocalDate
 import java.time.ZoneId
@@ -18,6 +19,8 @@ import java.time.temporal.ChronoUnit
  * @param occurrence 这节课(若为调来的,`date` 已经是**目标日**)
  * @param movedFrom  非 null = 这是从那天调来的
  * @param movedTo    非 null = 这节课已经被调走(界面灰显,不可点)
+ * @param voided     非 null = 这一节**已失效**(标灰 / 移除)。`HIDE` 的条目
+ *                   根本不会出现在结果里,所以这里只会是 `GREY`
  * @param snapshotOnly 见该字段的说明
  */
 data class EffectiveCourse(
@@ -32,9 +35,15 @@ data class EffectiveCourse(
      * 点开详情、再点「课节改动」,改的就成了错误的那一天。
      */
     val snapshotOnly: Boolean = false,
+    /** 已失效;见 [VoidMode]。它仍可点开 —— 那是唯一能把「失效」改回来的入口。 */
+    val voided: VoidMode? = null,
 ) {
     val isMovedOut: Boolean get() = movedTo != null
     val isMovedIn: Boolean get() = movedFrom != null
+    val isVoided: Boolean get() = voided != null
+
+    /** 这一节到底会不会上 —— 提醒、摘要、日历只认这个。 */
+    val attendable: Boolean get() = !isMovedOut && !isVoided
 }
 
 /**
@@ -83,7 +92,7 @@ object ScheduleOverrides {
     /**
      * [date] 那天实际要上的课。
      *
-     * 顺序:课节覆写 → 晚自习 → 调出标记 → 调来 → 合并 → 按时间排序。
+     * 顺序:课节覆写/失效 → 晚自习/临时课程 → 调出标记 → 调来 → 合并 → 按时间排序。
      * 目标日本来就有课时**两门都保留**(冲突如实显示,不覆盖不丢)。
      */
     fun forDate(
@@ -96,24 +105,25 @@ object ScheduleOverrides {
         val week = timetable.currentWeek
         val dayIndex = dayIndex(timetable, date)
 
-        // 1) 底表 + 课节覆写
-        val patched = ClassReminder.forDate(timetable, date, times).map { o ->
-            if (dayIndex == null) o
-            else applyOverride(o, week, dayIndex, overlays.courseOverrides, times, zone)
-        }
+        // 1) 底表 + 课节覆写 + 失效(「移除」的那几节到这里就没了)
+        val withCustom = ArrayList<EffectiveCourse>(serverDay(timetable, times, overlays, date, dayIndex, zone))
 
         // 2) 晚自习 + 临时课程:两层都不参与调休,所以先并进来再统一走后面的排序
-        val withCustom = if (dayIndex == null) patched
-        else patched +
-            selfStudyOccurrences(timetable, overlays.selfStudies, date, dayIndex, times, zone) +
+        if (dayIndex != null) {
+            selfStudyOccurrences(timetable, overlays.selfStudies, date, dayIndex, times, zone)
+                .forEach { withCustom += EffectiveCourse(it) }
             customCourseOccurrences(timetable, times, overlays, date, dayIndex, zone)
+                .forEach { withCustom += EffectiveCourse(it) }
+        }
 
         // 3) 被调走的:标灰,但仍然留在原位(需求明确要求"原位置变成灰色选项卡")
-        val out = withCustom.map { o ->
-            // 自定义层不参与调休 —— 整天课被调走时它们仍在本日
-            val moved = if (o.isCustom) null
-            else overlays.shifts.firstOrNull { it.fromDate == date && it.covers(o.courseName) }
-            EffectiveCourse(o, movedTo = moved?.toDate)
+        val out = withCustom.map { e ->
+            val o = e.occurrence
+            // 自定义层与已失效的课都不参与调休 ——
+            // 取消掉的课不该跟着整天调休被搬到别的日子去
+            val moved = if (o.isCustom || e.voided != null) null
+            else overlays.shifts.firstOrNull { it.fromDate == date && it.covers(o.courseName, o.courseKey) }
+            e.copy(movedTo = moved?.toDate)
         }.toMutableList()
 
         // 4) 调来的:两条取数路径,取决于源日期在不在当前加载的这一周
@@ -124,14 +134,14 @@ object ScheduleOverrides {
             val fromIndex = dayIndex(timetable, from)
 
             if (fromIndex != null) {
-                // 源日期就在当前这一周 → 用实时底表,顺带带上那一天的课节覆写
-                ClassReminder.forDate(timetable, from, times)
-                    .filter { s.covers(it.courseName) }
-                    .map { applyOverride(it, week, fromIndex, overlays.courseOverrides, times, zone) }
-                    .forEach { o ->
+                // 源日期就在当前这一周 → 用实时底表,顺带带上那一天的课节覆写。
+                // 已失效的那几节不搬 —— 它们不上,搬到目标日就等于"取消的课又出现了"。
+                serverDay(timetable, times, overlays, from, fromIndex, zone)
+                    .filter { it.voided == null && s.covers(it.occurrence.courseName, it.occurrence.courseKey) }
+                    .forEach { e ->
                         out.add(
                             EffectiveCourse(
-                                occurrence = ClassReminder.retime(o, date, zone),
+                                occurrence = ClassReminder.retime(e.occurrence, date, zone),
                                 movedFrom = from,
                             ),
                         )
@@ -143,7 +153,7 @@ object ScheduleOverrides {
                 // 而它对"不在本周的日期"一律返回空 —— 于是目标位置什么都没有,
                 // 原位置却照常灰显(那是纯日期比较,不受周限制)。
                 s.snapshot
-                    .filter { s.covers(it.name) }
+                    .filter { s.coversSnapshotEntry(it.name) }
                     .mapNotNull { materialize(it, date, week, times, zone) }
                     .forEach { o ->
                         out.add(EffectiveCourse(o, movedFrom = from, snapshotOnly = true))
@@ -155,20 +165,66 @@ object ScheduleOverrides {
     }
 
     /**
+     * 某一天的**服务端课**,经过课节覆写与失效处理之后的结果。
+     *
+     * 「移除」的条目在这里就被剔掉 —— 网格、日程、提醒、导出因此天然看不到它,
+     * 不需要每个消费方各自过滤一遍(那样必然有一处漏)。
+     *
+     * ⚠️ 调出与调来**两个方向都走它**:少了任何一边,就会出现"取消的课被搬到了目标日"。
+     */
+    private fun serverDay(
+        timetable: Timetable,
+        times: PeriodTimes,
+        overlays: Overlays,
+        date: LocalDate,
+        dayIndex: Int?,
+        zone: ZoneId,
+    ): List<EffectiveCourse> {
+        val week = timetable.currentWeek
+        val out = ArrayList<EffectiveCourse>()
+        for (o in ClassReminder.forDate(timetable, date, times)) {
+            val hit = if (dayIndex == null) null
+            else findOverride(o, week, dayIndex, overlays.courseOverrides)
+            if (hit?.voided == VoidMode.HIDE) continue
+            val occ = if (hit == null) o else applyOverrideValues(o, hit, times, zone)
+            out.add(EffectiveCourse(occ, voided = hit?.voided))
+        }
+        return out
+    }
+
+    /**
      * 取 [date] 那天、[courses] 指定的那几节课的**快照**。创建调休时调用。
      *
      * 取不到(那天不在 [timetable] 覆盖的那一周)返回空 —— **调用方不该因此拒绝创建**:
      * 同周调休本来就不需要快照,跨周的那部分等用户翻到源周时由 `AppViewModel` 补齐。
+     *
+     * @param courseKeys 实例级调课:只取这几节(优先于 [courses])
+     *
+     * 已失效的课**不进快照** —— 它不上,搬到目标日就是错的。
      */
     fun snapshotOf(
         timetable: Timetable,
         date: LocalDate,
         times: PeriodTimes,
-        courses: List<String>?,
-    ): List<ShiftCourse> =
-        ClassReminder.forDate(timetable, date, times)
-            .filter { courses.isNullOrEmpty() || courses.any { n -> n == it.courseName } }
+        courses: List<String>? = null,
+        courseKeys: List<String>? = null,
+        overrides: List<CourseOverride> = emptyList(),
+    ): List<ShiftCourse> {
+        val week = timetable.currentWeek
+        val dayIndex = dayIndex(timetable, date)
+        return ClassReminder.forDate(timetable, date, times)
+            .filter { o ->
+                when {
+                    !courseKeys.isNullOrEmpty() -> o.courseKey in courseKeys
+                    else -> courses.isNullOrEmpty() || courses.any { n -> n == o.courseName }
+                }
+            }
+            .filter { o ->
+                // 失效的那几节不搬 —— 它不上,搬到目标日就是错的
+                dayIndex == null || findOverride(o, week, dayIndex, overrides)?.voided == null
+            }
             .map { ShiftCourse(it.courseName, it.teacher, it.room, "${it.periodStart}-${it.periodEnd}") }
+    }
 
     /**
      * 把一条快照还原成目标日的一次课。
@@ -233,8 +289,8 @@ object ScheduleOverrides {
         for (offset in -1..2) {
             val date = today.plusDays(offset.toLong())
             for (e in forDate(timetable, times, overlays, date, zone)) {
-                // 被调走的课**不提醒** —— 它已经不在那天上了
-                if (e.isMovedOut) continue
+                // 被调走的、已失效的都不提醒 —— 前者不在那天上,后者干脆不上
+                if (!e.attendable) continue
                 val start = e.occurrence.classStartMillis ?: continue
                 val fire = start - leadMs
                 // 已过提醒点的不补,否则半夜装完 App 会被当天所有早课轰一遍
@@ -265,30 +321,38 @@ object ScheduleOverrides {
         return (0..6).map { forDate(timetable, times, overlays, monday.plusDays(it.toLong()), zone) }
     }
 
-    // ---- 覆盖层 1:课节覆写 ----
+    // ---- 覆盖层 1:课节覆写 / 失效 ----
+
+    /** 找出 `(周次, 星期, 底表身份)` 三条全中的那条覆写;没有返回 null。 */
+    private fun findOverride(
+        o: ClassOccurrence,
+        week: Int,
+        weekday: Int,
+        overrides: List<CourseOverride>,
+    ): CourseOverride? {
+        if (overrides.isEmpty() || o.courseKey.isBlank()) return null
+        return overrides.firstOrNull {
+            it.week == week && it.weekday == weekday && it.courseKey == o.courseKey
+        }
+    }
 
     /**
-     * 把课节覆写打到一节课上。
+     * 把课节覆写的**教室 / 节次**打到一节课上。
      *
      * 只认 `(周次, 星期, 底表身份)` 三条全中的条目 —— 粒度是"**这一节**",
      * 不是"这门课":同一门课别的星期几、别的周次都不受影响。
      *
      * 只改节次时必须走 [ClassReminder.retimePeriods] 重算时间标签与绝对时刻,
      * 否则会出现"格子挪到第 3 节了,但提醒还按第 5 节响"。
+     *
+     * 失效([VoidMode])不在这里处理:它是"整节还在不在",由 [serverDay] 决定。
      */
-    private fun applyOverride(
+    private fun applyOverrideValues(
         o: ClassOccurrence,
-        week: Int,
-        weekday: Int,
-        overrides: List<CourseOverride>,
+        hit: CourseOverride,
         times: PeriodTimes,
         zone: ZoneId,
     ): ClassOccurrence {
-        if (overrides.isEmpty() || o.courseKey.isBlank()) return o
-        val hit = overrides.firstOrNull {
-            it.week == week && it.weekday == weekday && it.courseKey == o.courseKey
-        } ?: return o
-
         val room = hit.room?.takeIf { it.isNotBlank() } ?: o.room
         val withRoom = if (room == o.room) o else o.copy(room = room)
 
@@ -457,8 +521,4 @@ object ScheduleOverrides {
         val monday = ClassReminder.weekMonday(timetable) ?: return null
         return ChronoUnit.DAYS.between(monday, date).toInt().takeIf { it in 0..6 }
     }
-
-    /** 某条调休是否管到这门课:`courses` 为空表示整天都管。 */
-    private fun Shift.covers(courseName: String): Boolean =
-        courses.isNullOrEmpty() || courses.any { it == courseName }
 }

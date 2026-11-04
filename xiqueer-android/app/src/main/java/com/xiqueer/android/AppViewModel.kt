@@ -477,11 +477,20 @@ class AppViewModel(
      */
     private fun backfillShiftSnapshots(t: Timetable) {
         val times = state.periodTimes
+        val ov = state.overlays
         var changed = false
         for (s in shiftStore.all()) {
             if (s.snapshot.isNotEmpty()) continue
             val from = s.fromDate ?: continue
-            val snap = com.xiqueer.android.notify.ScheduleOverrides.snapshotOf(t, from, times, s.courses)
+            // 实例级(单节调课)必须按身份取,否则会把源那天**整天**都拍进快照
+            val snap = com.xiqueer.android.notify.ScheduleOverrides.snapshotOf(
+                timetable = t,
+                date = from,
+                times = times,
+                courses = s.courses,
+                courseKeys = s.courseKeys,
+                overrides = ov.courseOverrides,
+            )
             if (snap.isNotEmpty() && shiftStore.setSnapshot(s.id, snap)) changed = true
         }
         if (changed) state = state.copy(overlays = readOverlays())
@@ -494,38 +503,110 @@ class AppViewModel(
         }
     }
 
-    // ---- 课节覆写(改某一节的教室 / 节次)----
+    // ---- 课节覆写 / 失效 / 单节跨日调换 ----
+
+    /** 选中那一节的**源日期**(它在本周的哪一天);取不到返回 null。 */
+    fun selectedSourceDate(): java.time.LocalDate? {
+        val (weekday, _) = selectedCourseSlot() ?: return null
+        val t = state.timetable ?: return null
+        val monday = com.xiqueer.android.notify.ClassReminder.weekMonday(t) ?: return null
+        return monday.plusDays(weekday.toLong())
+    }
+
+    /** 选中那一节当前的「单节调课」目标日;没有返回 null。 */
+    fun selectedMoveTarget(): String? {
+        val (_, course) = selectedCourseSlot() ?: return null
+        val from = selectedSourceDate() ?: return null
+        val key = com.xiqueer.android.data.CourseKey.of(course)
+        return shiftStore.findSingle(from.toString(), key)?.to
+    }
 
     /**
-     * 写入/更新某个课节的覆写。
+     * 保存「课节改动」:教室 / 节次 / 失效 / 换到别的日子,一次写清。
      *
      * [week] 用**底表那一周的周次**(`timetable.currentWeek`),不是"真实本周" ——
      * 用户在课表页翻到第 5 周去改,改的就必须是第 5 周那一节。
      *
-     * `room` / `periods` 都为 null 等价于"恢复",直接清掉这条覆写。
+     * 失效与换天**互斥**(见 `CourseEditSheet`):传了其中一个,另一个会被忽略。
      *
      * @return 人话回执,直接显示给用户
      */
-    fun setCourseOverride(
+    fun saveCourseEdit(
         week: Int,
         weekday: Int,
         courseKey: String,
         room: String?,
         periods: String?,
+        voided: com.xiqueer.android.data.VoidMode?,
+        moveTo: String?,
     ): String {
         if (week <= 0) return "改不了:课表还没加载出周次"
-        val entry = courseOverrideStore.put(week, weekday, courseKey, room, periods)
+
+        val from = selectedSourceDate()
+        val to = moveTo?.trim()?.takeIf { it.isNotEmpty() }
+        val voice = if (voided != null) null else to   // 失效优先,换天让位
+
+        if (voice != null) {
+            val parsed = runCatching { java.time.LocalDate.parse(voice) }.getOrNull()
+                ?: return "没保存:目标日期要写成 yyyy-MM-dd"
+            if (from == null) return "没保存:算不出这节课原来在哪一天"
+            if (parsed == from) return "没保存:目标日期和原日期是同一天"
+            if (parsed.isBefore(from)) return "没保存:只能往后面的日子挪(跨周也支持)"
+        }
+
+        val entry = courseOverrideStore.put(week, weekday, courseKey, room, periods, voided)
+
+        // ---- 换天:先把这一节旧的实例级调课清掉,再按新日期重建 ----
+        var shiftMsg = ""
+        val tt = state.timetable
+        if (from != null && tt != null) {
+            val had = shiftStore.removeSingle(from.toString(), courseKey)
+            if (voice != null) {
+                val parsed = java.time.LocalDate.parse(voice)
+                // ⚠️ 源那天要搬的那一节必须**当场快照**:目标日可能落在别的周,
+                // 到那时再去取源那天的课是取不到的(与调休同一个坑,见 DESIGN.md §9.4)。
+                val snap = com.xiqueer.android.notify.ScheduleOverrides.snapshotOf(
+                    timetable = tt,
+                    date = from,
+                    times = state.periodTimes,
+                    courseKeys = listOf(courseKey),
+                    overrides = state.overlays.courseOverrides,
+                )
+                val added = shiftStore.add(
+                    from = from.toString(),
+                    to = parsed.toString(),
+                    courses = null,
+                    snapshot = snap,
+                    note = "单节调课",
+                    courseKeys = listOf(courseKey),
+                )
+                shiftMsg = when {
+                    added != null -> "已换到 $parsed"
+                    had -> "已撤销换天"
+                    else -> "换天没生效:目标日期不合法"
+                }
+            } else if (had) {
+                shiftMsg = "已撤销换天"
+            }
+        }
+
         state = state.copy(overlays = readOverlays())
         rescheduleReminders()
-        return if (entry == null) "已恢复这一节" else "已记录课节改动:${entry.describe()}"
+
+        val bits = ArrayList<String>(3)
+        entry?.let { bits.add(it.describe()) }
+        if (shiftMsg.isNotBlank()) bits.add(shiftMsg)
+        return if (bits.isEmpty()) "已恢复这一节" else "已记录:" + bits.joinToString(" · ")
     }
 
-    /** 清掉某一节的覆写(等于"恢复到原课节位置")。 */
-    fun clearCourseOverride(week: Int, weekday: Int, courseKey: String): String {
+    /** 清掉某一节的覆写与换天(等于"恢复到原课节位置")。 */
+    fun clearCourseEdit(week: Int, weekday: Int, courseKey: String): String {
         val removed = courseOverrideStore.remove(week, weekday, courseKey)
+        val from = selectedSourceDate()
+        val hadMove = from != null && shiftStore.removeSingle(from.toString(), courseKey)
         state = state.copy(overlays = readOverlays())
         rescheduleReminders()
-        return if (removed) "已恢复这一节" else "这一节本来就没有改动"
+        return if (removed || hadMove) "已恢复这一节" else "这一节本来就没有改动"
     }
 
     // ---- 晚自习(自定义时段)----

@@ -54,10 +54,14 @@ android {
         // 晚自习(自定义时段,进网格 + 日程 + 提醒)。四种导出(ics/xlsx/csv/png)全部覆盖。
         // 覆盖层与底表严格分开写:刷新冲不掉,也不会污染服务器数据。
         //
+        // V1.0.4 —— 临时课程(紧急调换/开会)、悬浮窗可拖动 + 贴边收起,
+        // 以及「课节改动」面板里的**单节失效**(标灰/移除)与**单节跨日调换**。
+        // 失效与换天都落在"这一节"的粒度上,与调休(按天)区分开。
+        //
         // ⚠️ 从源码自建时,如果要覆盖安装已发布的包,**版本号必须 >= 它**,
         // 否则 Android 会以 INSTALL_FAILED_VERSION_DOWNGRADE 拒绝。
-        versionCode = 4
-        versionName = "mlOfficial-V1.0.3"
+        versionCode = 5
+        versionName = "mlOfficial-V1.0.4"
     }
 
     signingConfigs {

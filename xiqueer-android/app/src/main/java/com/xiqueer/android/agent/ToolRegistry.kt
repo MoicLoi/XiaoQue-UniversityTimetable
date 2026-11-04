@@ -222,7 +222,8 @@ class ToolRegistry(
             // 走覆盖层:AI 说的必须和界面显示的是同一份(调休、改过的教室、晚自习都算)。
             val list = com.xiqueer.android.notify.ScheduleOverrides
                 .forDate(t, periods.load(), overlays(), LocalDate.now())
-                .filter { !it.isMovedOut }
+                // 被调走 / 已失效的课不当成"今天要上" —— AI 说的必须与界面一致
+                .filter { it.attendable }
                 .map { it.occurrence }
             if (list.isEmpty()) "今天没有课。"
             else "今天 ${list.size} 节课:\n" + list.joinToString("\n") { "· " + it.scheduleLine() }
@@ -243,7 +244,8 @@ class ToolRegistry(
                     val rows = if (date != null) {
                         com.xiqueer.android.notify.ScheduleOverrides
                             .forDate(t, times, ov, date)
-                            .filter { !it.isMovedOut }
+                            // 同上:调走 / 失效的不该在"这周要上什么"里出现
+                            .filter { it.attendable }
                             .map { it.occurrence }
                     } else {
                         emptyList()

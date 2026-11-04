@@ -115,7 +115,8 @@ object ReminderScheduler {
         val courses = (0..1)
             .flatMap { d ->
                 ScheduleOverrides.forDate(timetable, times, overlays, today.plusDays(d.toLong()))
-                    .filter { !it.isMovedOut }
+                    // 被调走的、已失效的都不算"正在上"
+                    .filter { it.attendable }
                     .map { it.occurrence }
             }
             .sortedBy { it.classStartMillis ?: Long.MAX_VALUE }
@@ -350,7 +351,7 @@ class DigestAlarmReceiver : BroadcastReceiver() {
         val courses = if (timetable == null) emptyList()
         else ScheduleOverrides
             .forDate(timetable, store.load(), Overlays.load(context), today)
-            .filter { !it.isMovedOut }   // 被调走的课不再算"今天要上"
+            .filter { it.attendable }   // 被调走 / 已失效的都不算"今天要上"
             .map { it.occurrence }
         // 没课也发一条 —— 让用户确信提醒是活的,而不是静默失效
         if (timetable != null) Notifications.digest(context, today, courses)

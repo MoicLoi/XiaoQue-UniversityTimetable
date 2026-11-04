@@ -93,8 +93,10 @@ fun ScheduleScreen(
         ScheduleOverrides.forDate(timetable, times, overlays, today)
     }
     val now = nowMillis
-    // 被调走的课不参与"还剩几节"的判断 —— 它今天不上了
-    val stillToAttend = todayCourses.filter { !it.isMovedOut && !isDone(it.occurrence, now) }
+    // 被调走的、已失效的课不参与"还剩几节"的判断 —— 它们今天都不上
+    val stillToAttend = todayCourses.filter {
+        !it.isMovedOut && !it.isVoided && !isDone(it.occurrence, now)
+    }
 
     /**
      * 显示哪一天。
@@ -214,8 +216,10 @@ private fun ScheduleRow(
         hasPeriodTimes = times.configured,
         movedOut = e.movedTo,
         movedIn = e.movedFrom,
+        voided = e.voided,
         // 快照还原的跨周调来课、以及自定义层(晚自习 / 临时课程)在底表里都没有身份,
-        // courseOf 会误配同名课 —— 直接不给点击
+        // courseOf 会误配同名课 —— 直接不给点击。
+        // 失效的课**要**能点:那是把「已失效」改回「正常」的唯一入口。
         onClick = { if (e.snapshotOnly || o.isCustom) Unit else courseOf(timetable, o)?.let(onCourseClick) },
     )
     Spacer(Modifier.height(8.dp))
@@ -268,11 +272,12 @@ private fun DateHeaderCard(
  * 一张课程卡。
  *
  * [isNearest] 的那张加粗放大 —— 这是这一页唯一要抢注意力的东西。
- * 左侧色条表达状态(绿=已上完 / 黄=未上 / 灰=已调走),整卡不染色。
+ * 左侧色条表达状态(绿=已上完 / 黄=未上 / 灰=已调走或已失效),整卡不染色。
  *
- * 调休的两种痕迹(需求明确要求):
- * - [movedOut] 非 null:这节课被调走了 → **整卡灰掉、不可点**,并标出调去了哪天;
- * - [movedIn] 非 null:这节课是从别处调来的 → 正常显示,加一个「调休」小标。
+ * 三种覆盖层痕迹,文案必须区分开(用户靠文字分辨"为什么不上"):
+ * - [movedOut] 非 null:被调走 → **整卡灰掉、不可点**,标「已调至 10-12」;
+ * - [movedIn] 非 null:从别处调来 → 正常显示,加一个「调休」小标;
+ * - [voided] 非 null:已失效 → **灰掉但可点**(点开才能改回正常),标「已失效」。
  */
 @Composable
 private fun CourseCard(
@@ -284,27 +289,33 @@ private fun CourseCard(
     hasPeriodTimes: Boolean,
     movedOut: java.time.LocalDate? = null,
     movedIn: java.time.LocalDate? = null,
+    voided: com.xiqueer.android.data.VoidMode? = null,
     onClick: () -> Unit,
 ) {
+    /** 已调走:不可点(恢复要动整条调休,归「更多 → 调休」管)。 */
     val disabled = movedOut != null
+    /** 灰显:已调走或已失效。 */
+    val greyed = disabled || voided != null
+    /** 只有"真的会上"的那节才算最近一节 / 才有进度提示。 */
+    val live = !greyed
     val bar = when {
-        disabled -> MOVED                        // 灰:已调走
+        greyed -> MOVED                          // 灰:已调走 / 已失效
         isDone -> DONE                           // 绿:已上完
         else -> TODO                             // 黄:未上
     }
     GlassSurface(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(16.dp),
-        tint = if (isNearest && !disabled) GlassTokens.FillStrong else GlassTokens.Fill,
+        tint = if (isNearest && live) GlassTokens.FillStrong else GlassTokens.Fill,
         contentPadding = PaddingValues(0.dp),
     ) {
         Row(Modifier.fillMaxWidth()) {
             // 左侧色条
-            Box(Modifier.width(5.dp).height(if (isNearest && !disabled) 118.dp else 92.dp).background(bar))
+            Box(Modifier.width(5.dp).height(if (isNearest && live) 118.dp else 92.dp).background(bar))
             Column(
                 Modifier
                     .weight(1f)
-                    // 调走了就不可点 —— 这正是需求里"disabled"的意思
+                    // 调走了就不可点;失效的课仍然可点 —— 那是改回「正常」的唯一入口
                     .clickable(enabled = !disabled, onClick = onClick)
                     .padding(horizontal = 14.dp, vertical = 12.dp),
             ) {
@@ -314,12 +325,12 @@ private fun CourseCard(
                         // periodLabel() 把这条口径收在一处(见 ClassOccurrence)
                         o.periodLabel(),
                         color = when {
-                            disabled -> XqColors.TextTertiary
+                            greyed -> XqColors.TextTertiary
                             isNearest -> XqColors.AccentSoft
                             else -> XqColors.TextTertiary
                         },
-                        fontSize = if (isNearest && !disabled) 13.sp else 11.sp,
-                        fontWeight = if (isNearest && !disabled) FontWeight.SemiBold else FontWeight.Normal,
+                        fontSize = if (isNearest && live) 13.sp else 11.sp,
+                        fontWeight = if (isNearest && live) FontWeight.SemiBold else FontWeight.Normal,
                     )
                     o.startLabel?.let {
                         Spacer(Modifier.width(8.dp))
@@ -341,12 +352,16 @@ private fun CourseCard(
                             fontSize = 10.sp,
                         )
                     }
-                    if (isDone && !disabled) {
+                    if (voided != null) {
+                        Spacer(Modifier.width(8.dp))
+                        Text("已失效", color = XqColors.TextSecondary, fontSize = 10.sp)
+                    }
+                    if (isDone && live) {
                         Spacer(Modifier.width(8.dp))
                         Text("已上完", color = DONE, fontSize = 10.sp)
                     }
                     // 正在上的一节:给出"还剩多少分钟"
-                    if (!isDone && !disabled && isOngoing(o, nowMillis)) {
+                    if (!isDone && live && isOngoing(o, nowMillis)) {
                         Spacer(Modifier.width(8.dp))
                         Text(
                             "进行中 · 还剩 ${minutesLeft(o, nowMillis)} 分钟",
@@ -359,21 +374,21 @@ private fun CourseCard(
                 Spacer(Modifier.height(4.dp))
                 Text(
                     o.courseName,
-                    color = if (disabled) XqColors.TextTertiary else XqColors.TextPrimary,
-                    fontSize = if (isNearest && !disabled) 19.sp else 15.sp,
-                    fontWeight = if (isNearest && !disabled) FontWeight.Bold else FontWeight.Medium,
-                    lineHeight = if (isNearest && !disabled) 24.sp else 20.sp,
+                    color = if (greyed) XqColors.TextTertiary else XqColors.TextPrimary,
+                    fontSize = if (isNearest && live) 19.sp else 15.sp,
+                    fontWeight = if (isNearest && live) FontWeight.Bold else FontWeight.Medium,
+                    lineHeight = if (isNearest && live) 24.sp else 20.sp,
                 )
                 val where = listOf(o.room, o.teacher).filter { it.isNotBlank() }.joinToString(" · ")
                 if (where.isNotBlank()) {
                     Spacer(Modifier.height(2.dp))
                     Text(
                         where,
-                        color = if (disabled) XqColors.TextTertiary else XqColors.TextSecondary,
-                        fontSize = if (isNearest && !disabled) 13.sp else 12.sp,
+                        color = if (greyed) XqColors.TextTertiary else XqColors.TextSecondary,
+                        fontSize = if (isNearest && live) 13.sp else 12.sp,
                     )
                 }
-                if (disabled) {
+                if (greyed) {
                     // 灰卡就不再喊"要带什么"了 —— 这节课今天不上了
                 } else if (itemText.isNotBlank()) {
                     Spacer(Modifier.height(6.dp))

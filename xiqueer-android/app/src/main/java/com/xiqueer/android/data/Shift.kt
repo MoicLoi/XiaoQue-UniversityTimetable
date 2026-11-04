@@ -29,7 +29,18 @@ data class ShiftCourse(
 /**
  * 一次调休:把 [from] 那天的课挪到 [to] 那天上。
  *
- * [courses] 为 `null` 表示整天都挪;非 null 表示只挪其中这几门(按课程名)。
+ * 两种粒度,用哪个字段表达:
+ *
+ * | 场景 | [courses] | [courseKeys] | 含义 |
+ * |---|---|---|---|
+ * | 整天调休 | `null` | `null` | [from] 那天全部课都搬 |
+ * | 按课名调休 | 课名列表 | `null` | 只搬这几门课(**同一天两节同名课会一起搬**) |
+ * | 单节跨日调换 | `null` | 实例身份列表 | 只搬被点中的那一节 |
+ *
+ * [courseKeys] 是 `CourseKey.of(course)` 算出来的**底表身份**
+ * (`name|periods|room|teacher`)。粒度比课名细一层:同一天两节「实验动物解剖学」,
+ * 按课名会两节一起搬,按身份只搬被点的那一节 —— 这样才叫"单节调课"。
+ *
  * 日期存字符串(`yyyy-MM-dd`)而不是 `LocalDate` —— 序列化时不用处理任何日期格式。
  *
  * [snapshot] 是创建时记下的"源那天实际要搬的课",见 [ShiftCourse]。
@@ -41,16 +52,45 @@ data class Shift(
     val from: String,
     val to: String,
     val courses: List<String>? = null,
+    /** 实例级:只搬这几节(见类注释)。与 [courses] 互斥使用。 */
+    val courseKeys: List<String>? = null,
     val note: String = "",
     val snapshot: List<ShiftCourse> = emptyList(),
 ) {
     val fromDate: LocalDate? get() = runCatching { LocalDate.parse(from) }.getOrNull()
     val toDate: LocalDate? get() = runCatching { LocalDate.parse(to) }.getOrNull()
 
+    /** 是不是"单节调课"(实例级来回,而不是整天/按课名)。 */
+    val isSingleCourse: Boolean get() = !courseKeys.isNullOrEmpty()
+
+    /**
+     * 这条调休管不管**这一节课**。
+     *
+     * 实例级只认身份 —— 这正是"单节"与"按课名"的区别所在。
+     */
+    fun covers(courseName: String, courseKey: String): Boolean {
+        if (isSingleCourse) return courseKey.isNotBlank() && courseKey in courseKeys.orEmpty()
+        return courses.isNullOrEmpty() || courses.any { it == courseName }
+    }
+
+    /**
+     * 快照里的这一条该不该还原到目标日。
+     *
+     * 与 [covers] 分开是**必须的**:快照里没有身份([ShiftCourse] 刻意不存),
+     * 而实例级条目的快照在创建时就是"那几节",整份都要还原 ——
+     * 拿名字去过滤要么全丢、要么误留。
+     */
+    fun coversSnapshotEntry(name: String): Boolean =
+        if (isSingleCourse) true
+        else courses.isNullOrEmpty() || courses.any { it == name }
+
     /** 一行的可读描述。 */
     fun describe(): String = buildString {
         append(from).append(" → ").append(to)
-        if (!courses.isNullOrEmpty()) append(" · ").append(courses.joinToString("、"))
+        when {
+            isSingleCourse -> append(" · 单节:").append(snapshot.firstOrNull()?.name ?: "1 节")
+            !courses.isNullOrEmpty() -> append(" · ").append(courses.joinToString("、"))
+        }
         if (note.isNotBlank()) append(" · ").append(note)
     }
 }
@@ -83,6 +123,7 @@ class ShiftStore(context: Context) {
      *
      * @param snapshot 源那天要搬的课的快照。取不到时传空 —— **不要因此拒绝创建**:
      *   同周调休本来就不需要它,跨周的那部分等用户翻到源周时由 `AppViewModel` 补齐。
+     * @param courseKeys 实例级调课:只搬这几节;整天/按课名调休传 null。
      * @return 实际写入的条目;被拒绝时返回 null(调用方据此给人话解释)
      */
     fun add(
@@ -91,6 +132,7 @@ class ShiftStore(context: Context) {
         courses: List<String>?,
         snapshot: List<ShiftCourse> = emptyList(),
         note: String = "",
+        courseKeys: List<String>? = null,
     ): Shift? {
         val f = runCatching { LocalDate.parse(from.trim()) }.getOrNull() ?: return null
         val t = runCatching { LocalDate.parse(to.trim()) }.getOrNull() ?: return null
@@ -98,10 +140,13 @@ class ShiftStore(context: Context) {
         if (f == t) return null
 
         val list = all().toMutableList()
-        // 同一 (from, to, 课程集合) 重复添加视为无操作
+        // 同一 (from, to, 课程集合, 实例集合) 重复添加视为无操作。
+        // ⚠️ 实例集合必须参与比较:两条单节调课都是 courses=null,
+        // 少了它会被误判成重复,第二条静默丢掉。
         val dup = list.any {
             it.from == f.toString() && it.to == t.toString() &&
-                it.courses.orEmpty().toSet() == courses.orEmpty().toSet()
+                it.courses.orEmpty().toSet() == courses.orEmpty().toSet() &&
+                it.courseKeys.orEmpty().toSet() == courseKeys.orEmpty().toSet()
         }
         if (dup) return null
 
@@ -110,6 +155,7 @@ class ShiftStore(context: Context) {
             from = f.toString(),
             to = t.toString(),
             courses = courses?.takeIf { it.isNotEmpty() },
+            courseKeys = courseKeys?.filter { it.isNotBlank() }?.takeIf { it.isNotEmpty() },
             note = note.trim(),
             snapshot = snapshot,
         )
@@ -146,6 +192,20 @@ class ShiftStore(context: Context) {
         return removed
     }
 
+    /** 删掉"从 [from] 出发、只搬 [courseKey] 这一节"的实例级调课。返回是否删到。 */
+    fun removeSingle(from: String, courseKey: String): Boolean {
+        val list = all().toMutableList()
+        val removed = list.removeAll {
+            it.from == from && it.isSingleCourse && courseKey in it.courseKeys.orEmpty()
+        }
+        if (removed) write(list)
+        return removed
+    }
+
+    /** 找"从 [from] 出发、只搬 [courseKey] 这一节"的实例级调课。 */
+    fun findSingle(from: String, courseKey: String): Shift? =
+        all().firstOrNull { it.from == from && it.isSingleCourse && courseKey in it.courseKeys.orEmpty() }
+
     fun clear() {
         if (file.exists()) file.delete()
     }
@@ -160,6 +220,12 @@ class ShiftStore(context: Context) {
                     append("null")
                 } else {
                     append(s.courses.joinToString(",", "[", "]") { JsonText.quote(it) })
+                }
+                append(""","courseKeys":""")
+                if (s.courseKeys == null) {
+                    append("null")
+                } else {
+                    append(s.courseKeys.joinToString(",", "[", "]") { JsonText.quote(it) })
                 }
                 append(""","snapshot":""")
                 append(
@@ -180,11 +246,14 @@ class ShiftStore(context: Context) {
             val from = m["from"]?.toString() ?: return@mapNotNull null
             val to = m["to"]?.toString() ?: return@mapNotNull null
             val courses = (m["courses"] as? List<*>)?.mapNotNull { it?.toString() }
+            // 老数据没有这个键 —— 一律当"整天/按课名",行为与升级前一致
+            val keys = (m["courseKeys"] as? List<*>)?.mapNotNull { it?.toString() }
             Shift(
                 id = id,
                 from = from,
                 to = to,
                 courses = courses?.takeIf { it.isNotEmpty() },
+                courseKeys = keys?.takeIf { it.isNotEmpty() },
                 note = m["note"]?.toString().orEmpty(),
                 snapshot = parseSnapshot(m["snapshot"]),
             )

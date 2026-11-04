@@ -31,6 +31,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.xiqueer.android.data.Overlays
 import com.xiqueer.android.data.PeriodTimes
+import com.xiqueer.android.data.VoidMode
 import com.xiqueer.android.notify.ScheduleOverrides
 import com.xiqueer.android.ui.glass.GlassSurface
 import com.xiqueer.android.ui.glass.GlassTokens
@@ -42,7 +43,7 @@ import java.time.LocalDate
 private val ROW_HEIGHT = 54.dp
 private val GUTTER_WIDTH = 40.dp
 
-/** 已调走的格子用的灰(与日程页左侧色条同一个灰)。 */
+/** 已调走 / 已失效的格子用的灰(与日程页左侧色条同一个灰)。 */
 private val MOVED_GRAY = Color(0xFF6B7280)
 
 /** 课程配色只有一份,见 [com.xiqueer.android.CourseColors] —— 导出图片用的是同一套。 */
@@ -73,6 +74,17 @@ private data class GridCell(
      * 用于区分显示与后续判断,不是可点性的开关。
      */
     val custom: Boolean = false,
+    /**
+     * 非 null = 这一节**已失效**。
+     *
+     * 只有 [VoidMode.GREY] 会走到这里 —— [VoidMode.HIDE] 的课在
+     * `ScheduleOverrides` 里就被剔掉了,根本到不了网格。
+     *
+     * ⚠️ 与「已调走」不同:失效的格子**仍然可点**。这是唯一能把失效改回来的入口
+     * (点开课程 → 课节改动 → 失效选回「正常」);调走那种不可点,因为恢复要动整条调休,
+     * 归「更多 → 调休」管。两种灰的语义不同,所以文案必须区分开。
+     */
+    val voided: VoidMode? = null,
 )
 
 private data class Placed(val cell: GridCell, val span: Int, val lane: Int, val lanes: Int)
@@ -153,6 +165,7 @@ private fun weekCells(
                 movedOut = e.movedTo,
                 movedIn = e.movedFrom,
                 custom = o.isCustom,
+                voided = e.voided,
             )
         }
     }
@@ -444,10 +457,13 @@ private fun GridBody(
 @Composable
 private fun CourseBlock(placed: Placed, isToday: Boolean, modifier: Modifier, onClick: () -> Unit) {
     val cell = placed.cell
-    val disabled = cell.movedOut != null
-    val base = if (disabled) MOVED_GRAY else courseColor(cell.name)
+    /** 已调走:不可点(恢复要动整条调休,归「更多 → 调休」)。 */
+    val movedOut = cell.movedOut != null
+    /** 灰显:调走或失效。两者文案不同,但视觉同一族。 */
+    val greyed = movedOut || cell.voided != null
+    val base = if (greyed) MOVED_GRAY else courseColor(cell.name)
     val alpha = when {
-        disabled -> 0.20f
+        greyed -> 0.20f
         isToday -> 0.44f
         else -> 0.30f
     }
@@ -456,13 +472,15 @@ private fun CourseBlock(placed: Placed, isToday: Boolean, modifier: Modifier, on
             .padding(1.5.dp)
             .clip(RoundedCornerShape(10.dp))
             .background(base.copy(alpha = alpha))
-            .clickable(enabled = !disabled && cell.course != null, onClick = onClick)
+            // ⚠️ 失效的格子**仍然可点** —— 那是把「已失效」改回「正常」的唯一入口。
+            // 调走的那种不可点,两者语义不同。
+            .clickable(enabled = !movedOut && cell.course != null, onClick = onClick)
             .padding(horizontal = 4.dp, vertical = 4.dp),
     ) {
         Column {
             Text(
                 cell.name,
-                color = if (disabled) Color(0x99FFFFFF) else Color.White,
+                color = if (greyed) Color(0x99FFFFFF) else Color.White,
                 fontSize = 9.5.sp,
                 lineHeight = 11.sp,
                 fontWeight = FontWeight.Medium,
@@ -482,12 +500,13 @@ private fun CourseBlock(placed: Placed, isToday: Boolean, modifier: Modifier, on
             val mark = when {
                 cell.movedOut != null -> "→ ${cell.movedOut.monthValue}-${cell.movedOut.dayOfMonth}"
                 cell.movedIn != null -> "调休"
+                cell.voided != null -> "已失效"
                 else -> null
             }
             if (mark != null) {
                 Text(
                     mark,
-                    color = if (disabled) Color(0xB3FFFFFF) else XqColors.AccentSoft,
+                    color = if (greyed) Color(0xB3FFFFFF) else XqColors.AccentSoft,
                     fontSize = 7.5.sp,
                     lineHeight = 9.sp,
                     maxLines = 1,

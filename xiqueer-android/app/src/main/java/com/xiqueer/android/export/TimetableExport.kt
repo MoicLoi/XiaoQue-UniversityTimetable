@@ -4,6 +4,7 @@ import com.xiqueer.android.data.CourseKey
 import com.xiqueer.android.data.CustomCourse
 import com.xiqueer.android.data.Overlays
 import com.xiqueer.android.data.PeriodTimes
+import com.xiqueer.android.data.VoidMode
 import com.xiqueer.android.notify.ClassReminder
 import com.xiqueer.android.notify.ScheduleOverrides
 import com.xiqueer.protocol.Course
@@ -42,7 +43,7 @@ object TimetableExport {
     /**
      * 课程明细表头。顺序即列顺序,CSV 与 XLSX 共用。
      */
-    private val DETAIL_HEADER = listOf("课程名", "教师", "教室", "节次", "周次", "学分", "课程号")
+    private val DETAIL_HEADER = listOf("课程名", "教师", "教室", "节次", "周次", "学分", "课程号", "备注")
 
     private val WEEKDAYS = listOf("周一", "周二", "周三", "周四", "周五", "周六", "周日")
 
@@ -71,6 +72,35 @@ object TimetableExport {
         return t.copy(days = days)
     }
 
+    /**
+     * 本周的**失效**标记:`底表身份 → 失效方式`。
+     *
+     * 键用的是**覆写之后**的课程身份 —— [effective] 已经把覆写打上去了,
+     * 两边必须用同一把钥匙,否则"改了教室又标失效"的课会在这里找不到。
+     *
+     * 「移除」的课在网格与明细里**完全不出现**;「标灰」的仍然出现,
+     * 只是画成灰的、并在明细里带一句「已失效」。日历(ics)两者都不进。
+     */
+    private fun voidMap(t: Timetable, overlays: Overlays): Map<String, VoidMode> {
+        if (overlays.courseOverrides.isEmpty()) return emptyMap()
+        val week = t.currentWeek
+        val out = HashMap<String, VoidMode>()
+        for (day in 0..6) {
+            for (c in t.days.getOrElse(day) { emptyList() }) {
+                val hit = overlays.courseOverrides.firstOrNull {
+                    it.week == week && it.weekday == day && it.courseKey == CourseKey.of(c)
+                }
+                val mode = hit?.voided ?: continue
+                out[CourseKey.of(hit.applyTo(c))] = mode
+            }
+        }
+        return out
+    }
+
+    /** 这一门课在导出里该不该出现 / 怎么出现。 */
+    private fun voidModeOf(c: Course, voided: Map<String, VoidMode>): VoidMode? =
+        voided[CourseKey.of(c)]
+
     /** 网格总行数 = 服务端节次 + 人工行(晚自习 / 挂人工行的临时课程)。与 [grid] 必须一致。 */
     private fun rowsOf(t: Timetable, times: PeriodTimes, overlays: Overlays): Int =
         ScheduleOverrides.gridRows(t, times, overlays)
@@ -84,20 +114,29 @@ object TimetableExport {
      * 这里刻意不使用 UI 那套"泳道"布局:导出的目标是"看得全",
      * 不是"排得好看"。
      */
-    private fun grid(t: Timetable, times: PeriodTimes, overlays: Overlays): Array<Array<Cell?>> {
+    private fun grid(
+        t: Timetable,
+        times: PeriodTimes,
+        overlays: Overlays,
+        voided: Map<String, VoidMode>,
+    ): Array<Array<Cell?>> {
         val serverPeriods = maxOf(1, t.maxPeriod)
         val rows = rowsOf(t, times, overlays)
         val g = Array(rows) { arrayOfNulls<Cell>(7) }
         for (day in 0..6) {
             for (c in t.days.getOrElse(day) { emptyList() }) {
+                val mode = voidModeOf(c, voided)
+                // 「移除」的课连格子都不该有 —— 否则导出的图会和屏幕上对不上
+                if (mode == VoidMode.HIDE) continue
                 val (s, e) = parsePeriods(c.periods) ?: continue
                 if (s !in 1..serverPeriods) continue
                 val span = (e - s + 1).coerceAtMost(serverPeriods - s + 1)
+                val text = if (mode == VoidMode.GREY) cellText(c) + "\n已失效" else cellText(c)
                 val cell = g[s - 1][day]
                 if (cell == null) {
-                    g[s - 1][day] = Cell(cellText(c), span)
+                    g[s - 1][day] = Cell(text, span)
                 } else {
-                    cell.text = cell.text + "\n———\n" + cellText(c)
+                    cell.text = cell.text + "\n———\n" + text
                     cell.span = maxOf(cell.span, span)
                 }
             }
@@ -164,7 +203,7 @@ object TimetableExport {
 
     /**
      * 课程明细里的一行,列顺序同 [DETAIL_HEADER]:
-     * `名称 / 教师 / 教室 / 时段 / 生效范围 / 学分 / 课程号`。
+     * `名称 / 教师 / 教室 / 时段 / 生效范围 / 学分 / 课程号 / 备注`。
      *
      * 自定义层服务端没有学分与课程号 —— 留空而不是编一个。
      */
@@ -176,6 +215,19 @@ object TimetableExport {
         c.scopeLabel(),
         "",
         "",
+        "",
+    )
+
+    /** 服务端课程在明细里的一行。「标灰」的课在后面带一句「已失效」,与网格一致。 */
+    private fun detailRowOf(c: Course, mode: VoidMode?): List<String> = listOf(
+        c.name,
+        c.teacher,
+        c.room,
+        c.periods,
+        c.weeks,
+        c.credit,
+        c.code,
+        if (mode == VoidMode.GREY) "已失效" else "",
     )
 
     // ------------------------------------------------------------------ CSV
@@ -183,19 +235,20 @@ object TimetableExport {
     /** 一行一门课的规整数据。带 BOM,Excel 打开不乱码。 */
     fun csv(t: Timetable, overlays: Overlays): ByteArray {
         val e = effective(t, overlays)
+        val voided = voidMap(t, overlays)
         val sb = StringBuilder()
         sb.append(DETAIL_HEADER.joinToString(",")).append("\r\n")
         for (c in allCourses(e)) {
-            sb.append(
-                listOf(c.name, c.teacher, c.room, c.periods, c.weeks, c.credit, c.code)
-                    .joinToString(",") { csvField(it) },
-            ).append("\r\n")
+            val mode = voidModeOf(c, voided)
+            // 「移除」的课不出现在明细里 —— 与网格、日程同一口径
+            if (mode == VoidMode.HIDE) continue
+            sb.append(detailRowOf(c, mode).joinToString(",") { csvField(it) }).append("\r\n")
         }
         // 晚自习也各占一条 —— 它是"真的一节课",导出里少了它就对不上了。
         // 教师/学分/课程号服务端没有,留空而不是编一个。
         overlays.selfStudies.forEach { slot ->
             sb.append(
-                listOf(slot.label, "", "", slot.timeLabel(), slot.weekdayLabel(), "", "")
+                listOf(slot.label, "", "", slot.timeLabel(), slot.weekdayLabel(), "", "", "")
                     .joinToString(",") { csvField(it) },
             ).append("\r\n")
         }
@@ -223,9 +276,10 @@ object TimetableExport {
      */
     fun xlsx(t: Timetable, times: PeriodTimes, overlays: Overlays): ByteArray {
         val e = effective(t, overlays)
+        val voided = voidMap(t, overlays)
         val serverPeriods = maxOf(1, e.maxPeriod)
         val rows = rowsOf(e, times, overlays)
-        val g = grid(e, times, overlays)
+        val g = grid(e, times, overlays, voided)
         val manual = manualRows(e, times, overlays)
 
         // ---- sheet1:课表网格 ----
@@ -267,7 +321,7 @@ object TimetableExport {
         // ---- sheet2:课程明细 ----
         val s2 = StringBuilder()
         s2.append("""<cols>""")
-        val widths = listOf(26, 12, 20, 8, 22, 7, 14)
+        val widths = listOf(26, 12, 20, 8, 22, 7, 14, 12)
         widths.forEachIndexed { i, w ->
             s2.append("""<col min="${i + 1}" max="${i + 1}" width="$w" customWidth="1"/>""")
         }
@@ -276,10 +330,12 @@ object TimetableExport {
         DETAIL_HEADER.forEachIndexed { i, h -> s2.append(cellStr(colLetter(i + 1) + "1", h, STYLE_HEADER)) }
         s2.append("</row>")
         // 明细 = 服务端课程 + 晚自习 + 临时课程。三者列数相同,拼在一起即可。
-        val detailRows = allCourses(e).map {
-            listOf(it.name, it.teacher, it.room, it.periods, it.weeks, it.credit, it.code)
+        // 「移除」的课不进来;「标灰」的在备注列写一句「已失效」。
+        val detailRows = allCourses(e).mapNotNull { c ->
+            val mode = voidModeOf(c, voided)
+            if (mode == VoidMode.HIDE) null else detailRowOf(c, mode)
         } + overlays.selfStudies.map {
-            listOf(it.label, "", "", it.timeLabel(), it.weekdayLabel(), "", "")
+            listOf(it.label, "", "", it.timeLabel(), it.weekdayLabel(), "", "", "")
         } + overlays.customCourses.map { detailRowOf(it) }
         detailRows.forEachIndexed { i, vals ->
             val r = i + 2
@@ -368,6 +424,9 @@ object TimetableExport {
                     val hit = overlays.courseOverrides.firstOrNull {
                         it.week == w && it.weekday == day && it.courseKey == key
                     }
+                    // 已失效的这一节**不进日历** —— 不管标灰还是移除。
+                    // 日历里只该有"真会上"的课,否则手机会在取消的课上响铃。
+                    if (hit?.voided != null) continue
                     val periods = hit?.periods ?: c.periods
                     val room = hit?.room ?: c.room
                     val (s, e) = parsePeriods(periods) ?: continue

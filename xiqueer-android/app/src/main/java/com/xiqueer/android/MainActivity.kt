@@ -293,21 +293,27 @@ private fun AppRoot(vm: AppViewModel = viewModel()) {
             week = timetable?.currentWeek ?: 0,
             weekday = slot?.first ?: 0,
             override = vm.selectedOverride(),
-            onSave = { room, periods ->
+            moveTo = vm.selectedMoveTarget(),
+            sourceDate = vm.selectedSourceDate()?.toString(),
+            onSave = { room, periods, voided, moveTo ->
                 val s = vm.selectedCourseSlot()
                 if (s == null) "没选中课"
-                else vm.setCourseOverride(
+                else vm.saveCourseEdit(
                     week = timetable?.currentWeek ?: 0,
                     weekday = s.first,
                     courseKey = com.xiqueer.android.data.CourseKey.of(s.second),
-                    room = room,
-                    periods = periods,
+                    // 填回原值 = 不改。否则会在本地留下一条"和服务器一样"的覆写,
+                    // 以后服务器真改了教室,这条陈旧覆写会把旧值钉住。
+                    room = room?.takeIf { it != s.second.room },
+                    periods = periods?.takeIf { it != s.second.periods },
+                    voided = voided,
+                    moveTo = moveTo,
                 )
             },
             onRestore = {
                 val s = vm.selectedCourseSlot()
                 if (s == null) "没选中课"
-                else vm.clearCourseOverride(
+                else vm.clearCourseEdit(
                     week = timetable?.currentWeek ?: 0,
                     weekday = s.first,
                     courseKey = com.xiqueer.android.data.CourseKey.of(s.second),

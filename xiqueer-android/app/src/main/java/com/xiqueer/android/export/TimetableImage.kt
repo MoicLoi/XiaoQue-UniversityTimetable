@@ -192,7 +192,7 @@ object TimetableImage {
         val items = col.mapNotNull { e ->
             val o = e.occurrence
             if (o.periodStart !in 1..rows) null
-            else Item(o.courseName, o.periodStart, o.periodEnd, o.room, e.movedTo, e.movedFrom)
+            else Item(o.courseName, o.periodStart, o.periodEnd, o.room, e.movedTo, e.movedFrom, e.voided)
         }.sortedWith(compareBy({ it.start }, { -it.end }))
 
         val laneEnds = ArrayList<Int>()
@@ -230,16 +230,18 @@ object TimetableImage {
         bottom: Float,
     ) {
         val disabled = item.movedOut != null
-        val base = if (disabled) GRAY else CourseColors.of(item.name)
+        /** 灰显:已调走或已失效。两者文案不同,视觉同一族。 */
+        val greyed = disabled || item.voided != null
+        val base = if (greyed) GRAY else CourseColors.of(item.name)
 
-        val fill = fillPaint(if (disabled) 0x33 else 0x5A, base)
+        val fill = fillPaint(if (greyed) 0x33 else 0x5A, base)
         val rf = RectF(left, top, right, bottom)
         c.drawRoundRect(rf, 14f, 14f, fill)
 
         val padX = 10f
         val innerW = right - left - padX * 2
-        val namePaint = textPaint(if (disabled) 0x99FFFFFF.toInt() else 0xFFFFFFFF.toInt(), 22f, bold = true)
-        val roomPaint = textPaint(if (disabled) 0x88FFFFFF.toInt() else 0xCCFFFFFF.toInt(), 18f)
+        val namePaint = textPaint(if (greyed) 0x99FFFFFF.toInt() else 0xFFFFFFFF.toInt(), 22f, bold = true)
+        val roomPaint = textPaint(if (greyed) 0x88FFFFFF.toInt() else 0xCCFFFFFF.toInt(), 18f)
 
         var y = top + 30f
         for (line in wrap(namePaint, item.name, innerW, if (item.end - item.start >= 1) 3 else 2)) {
@@ -252,14 +254,15 @@ object TimetableImage {
                 y += 21f
             }
         }
-        // 调休痕迹:与网格页一致
+        // 覆盖层痕迹:与网格页一致(调走 / 调来 / 失效三种文案必须区分开)
         val mark = when {
             item.movedOut != null -> "→ ${item.movedOut.monthValue}-${item.movedOut.dayOfMonth}"
             item.movedIn != null -> "调休"
+            item.voided != null -> "已失效"
             else -> null
         }
         if (mark != null && y < bottom - 6f) {
-            val markPaint = textPaint(if (disabled) 0xB3FFFFFF.toInt() else ACCENT, 17f)
+            val markPaint = textPaint(if (greyed) 0xB3FFFFFF.toInt() else ACCENT, 17f)
             c.drawText(mark, left + padX, y + 4f, markPaint)
         }
     }
@@ -280,6 +283,8 @@ object TimetableImage {
         val room: String,
         val movedOut: LocalDate?,
         val movedIn: LocalDate?,
+        /** 非 null = 已失效(标灰)。「移除」的那种根本不会进这张图。 */
+        val voided: com.xiqueer.android.data.VoidMode? = null,
     )
 
     private fun todayColumn(t: Timetable): Int {
